@@ -1041,7 +1041,7 @@ async def withdraw(msg: types.Message):
 @dp.message(lambda m: m.text=="👥 Рефералы")
 async def referrals(msg: types.Message):
     uid=msg.from_user.id; refs=get_referrals(uid)
-    link=f"https://t.me/ТВОЙ_БОТ?start={uid}"
+    link=f"https://t.me/citympirebot?start={uid}"
     await msg.answer(
         f"👥 *РЕФЕРАЛЫ*\n{'═'*28}\n"
         f"💰 За каждого друга: *+500* 🪙\n{'─'*28}\n"
