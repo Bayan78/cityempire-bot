@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                             ReplyKeyboardMarkup, KeyboardButton)
 
-BOT_TOKEN = "8851197874:AAF16N6K3HPN4roucNRbSCTDH0d-fz1lugA"   # 👈 ЗАМЕНИ НА ТОКЕН ОТ @BotFather
+BOT_TOKEN = "ВАШ_ТОКЕН_СЮДА"   # 👈 ЗАМЕНИ НА ТОКЕН ОТ @BotFather
 OWNER_ID  = 976860643
 
 COIN_TO_USDT    = 0.00001
@@ -301,6 +301,10 @@ def get_crypto_mining(uid,ct):
     c = conn.cursor()
     c.execute("SELECT * FROM crypto_mining WHERE user_id=? AND crypto_type=?",(uid,ct))
     row = c.fetchone(); conn.close(); return row
+
+def is_vip(uid):
+    user = get_user(uid)
+    return user and user[5] == 1
 
 def do_crypto_mine(uid,ct):
     init_crypto_mining(uid)
@@ -730,10 +734,20 @@ async def crypto_withdraw_prompt(call: types.CallbackQuery):
     uid=call.from_user.id; ct=call.data.split("_",1)[1]
     info=CRYPTO_MINING[ct]; row=get_crypto_mining(uid,ct); bal=row[3] if row else 0
     min_w=0.001 if ct=="ton" else 100
+    # TON вывод только для VIP
+    if ct=="ton" and not is_vip(uid):
+        await call.answer(
+            "❌ Вывод TON только для VIP игроков!\n\nКупи VIP в 🛒 Магазине!",
+            show_alert=True
+        )
+        return
     await call.message.answer(
         f"💸 *Вывод {info['symbol']}*\n{'═'*28}\n"
         f"💼 Баланс: *{round(bal,6)} {info['symbol']}*\n"
-        f"📌 Минимум: *{min_w} {info['symbol']}*\n{'─'*28}\n"
+        f"📌 Минимум: *{min_w} {info['symbol']}*\n"
+        f"{'─'*28}\n"
+        f"{'👑 VIP привилегия!' if ct=='ton' else '✅ Доступно всем!'}\n"
+        f"{'─'*28}\n"
         f"Команда:\n`/cwithdraw {ct} ВАШ_TON_АДРЕС`\n{'═'*28}",
         parse_mode="Markdown"
     )
@@ -745,6 +759,15 @@ async def crypto_withdraw_cmd(msg: types.Message):
     if len(parts)!=3: return await msg.answer("Формат: `/cwithdraw ton АДРЕС`",parse_mode="Markdown")
     ct=parts[1].lower(); wallet=parts[2]
     if ct not in ["ton","city"]: return await msg.answer("❌ Тип: `ton` или `city`",parse_mode="Markdown")
+    # TON вывод только для VIP
+    if ct=="ton" and not is_vip(uid):
+        return await msg.answer(
+            f"❌ *Вывод TON только для VIP!*\n{'═'*28}\n"
+            f"👑 Купи VIP в 🛒 Магазине\n"
+            f"💎 VIP 7 дней — 30 ⭐\n"
+            f"💎 VIP 30 дней — 100 ⭐\n{'═'*28}",
+            parse_mode="Markdown"
+        )
     info=CRYPTO_MINING[ct]; row=get_crypto_mining(uid,ct); bal=row[3] if row else 0
     min_w=0.001 if ct=="ton" else 100
     if bal<min_w: return await msg.answer(f"❌ Минимум: {min_w} {info['symbol']}")
@@ -755,11 +778,17 @@ async def crypto_withdraw_cmd(msg: types.Message):
         f"✅ *ЗАЯВКА НА ВЫВОД {info['symbol']}!*\n{'═'*28}\n"
         f"💰 Сумма: *{round(bal,6)} {info['symbol']}*\n"
         f"👛 Адрес: `{wallet[:12]}...`\n"
+        f"{'─'*28}\n"
+        f"{'👑 VIP вывод TON!' if ct=='ton' else '🟡 Вывод CITY токенов!'}\n"
         f"⏳ Ожидай подтверждения\n{'═'*28}",
         parse_mode="Markdown"
     )
     await bot.send_message(OWNER_ID,
-        f"🔔 *ВЫВОД {info['symbol']}!*\n\n👤 `{uid}`\n💰 {round(bal,6)} {info['symbol']}\n👛 `{wallet}`",
+        f"🔔 *ВЫВОД {info['symbol']}!*\n\n"
+        f"👤 ID: `{uid}`\n"
+        f"💰 {round(bal,6)} {info['symbol']}\n"
+        f"👛 `{wallet}`\n"
+        f"{'👑 VIP игрок' if ct=='ton' else '🟡 CITY вывод'}",
         parse_mode="Markdown"
     )
 
@@ -1041,7 +1070,7 @@ async def withdraw(msg: types.Message):
 @dp.message(lambda m: m.text=="👥 Рефералы")
 async def referrals(msg: types.Message):
     uid=msg.from_user.id; refs=get_referrals(uid)
-    link=f"https://t.me/citympirebot?start={uid}"
+    link=f"https://t.me/ТВОЙ_БОТ?start={uid}"
     await msg.answer(
         f"👥 *РЕФЕРАЛЫ*\n{'═'*28}\n"
         f"💰 За каждого друга: *+500* 🪙\n{'─'*28}\n"
