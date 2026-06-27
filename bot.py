@@ -13,6 +13,26 @@ from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID  = 976860643
 GAME_URL  = os.getenv("GAME_URL", "https://bayanchatbot.github.io/cityempire-match/")
+# Путь к базе. На Railway ОБЯЗАТЕЛЬНО задай DB_PATH на постоянный Volume,
+# например /data/city_empire.db — иначе база стирается при каждом редеплое!
+DB = os.getenv("DB_PATH", "city_empire.db")
+
+# ───── Вывод TON на биржу/кошелёк ─────
+# Вывод TON ВСЕГДА только для VIP (жёстко зашито).
+TON_VIP_ONLY   = True
+# Авто-отправка TON on-chain. Включается ТОЛЬКО когда заданы и сид-фраза, и TON_AUTOSEND=1.
+# Иначе вывод обрабатывается вручную через админ-панель (безопасный режим по умолчанию).
+TON_AUTOSEND   = os.getenv("TON_AUTOSEND", "0") == "1"
+TON_MNEMONIC   = os.getenv("TON_WALLET_MNEMONIC", "")   # 24 слова через пробел (горячий кошелёк)
+TON_NETWORK    = os.getenv("TON_NETWORK", "mainnet")    # mainnet / testnet
+TON_WALLET_VERSION = os.getenv("TON_WALLET_VERSION", "v5r1")  # v5r1 (Tonkeeper W5) или v4r2
+TONCENTER_KEY  = os.getenv("TONCENTER_API_KEY", "")
+TON_MIN_WD     = float(os.getenv("TON_MIN_WITHDRAW", "0.05"))   # минимум TON к выводу
+CITY_MIN_WD    = float(os.getenv("CITY_MIN_WITHDRAW", "100"))   # минимум CITY к выводу
+OWNER_TON_REWARD = float(os.getenv("OWNER_TON_DAILY", "10"))    # TON/сутки лично для владельца
+# Дневные лимиты ВЫВОДА на одного игрока (защита пула + мотивация играть)
+CITY_DAILY_WD_CAP = float(os.getenv("CITY_DAILY_WITHDRAW_CAP", "10000"))  # макс CITY к выводу в сутки
+TON_DAILY_WD_CAP  = float(os.getenv("TON_DAILY_WITHDRAW_CAP", "2"))       # макс TON к выводу в сутки
 
 COIN_TO_USDT    = 0.00001
 MIN_WITHDRAW    = 50_000
@@ -48,9 +68,9 @@ MINER_LEVELS = {
 
 CRYPTO_MINING = {
     "ton":  {"name":"🔷 TON Майнинг", "symbol":"TON",  "cooldown":24,
-             "levels":{1:{"reward":0.0001,"cost_city":1000},2:{"reward":0.0003,"cost_city":5000},
-                       3:{"reward":0.0008,"cost_city":15000},4:{"reward":0.002,"cost_city":50000},
-                       5:{"reward":0.005,"cost_city":150000}}},
+             "levels":{1:{"reward":0.05,"cost_city":50000},   2:{"reward":0.1, "cost_city":200000},
+                       3:{"reward":0.2, "cost_city":600000},   4:{"reward":0.35,"cost_city":1500000},
+                       5:{"reward":0.5, "cost_city":4000000}}},
     "city": {"name":"🟡 CITY Майнинг","symbol":"CITY", "cooldown":12,
              "levels":{1:{"reward":10,"cost_coins":2000},2:{"reward":30,"cost_coins":8000},
                        3:{"reward":80,"cost_coins":25000},4:{"reward":200,"cost_coins":80000},
@@ -122,7 +142,7 @@ def format_coins(n):
     return str(n)
 
 def init_db():
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY, username TEXT,
@@ -179,6 +199,25 @@ def init_db():
         progress INTEGER DEFAULT 0, claimed INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, quest_id, quest_date)
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS game_progress (
+        user_id INTEGER PRIMARY KEY,
+        best_level INTEGER DEFAULT 0,
+        total_city INTEGER DEFAULT 0,
+        last_day TEXT DEFAULT NULL,
+        day_earned INTEGER DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS crypto_withdrawals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, crypto_type TEXT, amount REAL,
+        address TEXT, memo TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending', tx_hash TEXT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS wd_limits (
+        user_id INTEGER, crypto_type TEXT, day TEXT,
+        amount REAL DEFAULT 0,
+        PRIMARY KEY (user_id, crypto_type, day)
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT
     )""")
@@ -188,13 +227,13 @@ def init_db():
     conn.commit(); conn.close()
 
 def get_user(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE user_id=?",(uid,))
     row = c.fetchone(); conn.close(); return row
 
 def create_user(uid, uname, ref_id=None):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     bal = OWNER_START_BAL if uid==OWNER_ID else 500
     c.execute("INSERT OR IGNORE INTO users (user_id,username,balance,referrer_id) VALUES (?,?,?,?)",(uid,uname,bal,ref_id))
@@ -209,13 +248,13 @@ def create_user(uid, uname, ref_id=None):
     conn.commit(); conn.close()
 
 def get_buildings(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT building_id,level FROM buildings WHERE user_id=?",(uid,))
     rows = {r[0]:r[1] for r in c.fetchall()}; conn.close(); return rows
 
 def get_army(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT unit_id,amount FROM army WHERE user_id=?",(uid,))
     rows = {r[0]:r[1] for r in c.fetchall()}; conn.close(); return rows
@@ -229,7 +268,7 @@ def vip_active(uid):
     """True если игрок сейчас VIP (владелец — всегда; остальные — пока не истёк срок)."""
     if uid==OWNER_ID:
         return True
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT vip_until FROM users WHERE user_id=?",(uid,))
     row=c.fetchone(); conn.close()
     if row and row[0]:
@@ -240,7 +279,7 @@ def vip_active(uid):
     return False
 
 def get_boost(uid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT boost_mult,boost_until FROM users WHERE user_id=?",(uid,))
     row=c.fetchone(); conn.close()
     return row if row else (1,None)
@@ -266,7 +305,7 @@ def crypto_mult(uid):
 
 def activate_vip(uid, days):
     """Включает/продлевает VIP. Если ещё активен — добавляет дни сверху."""
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT vip_until FROM users WHERE user_id=?",(uid,))
     row=c.fetchone(); base=datetime.now()
     if row and row[0]:
@@ -281,14 +320,14 @@ def activate_vip(uid, days):
 
 def activate_boost(uid, mult, hours):
     until=(datetime.now()+timedelta(hours=hours)).isoformat()
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE users SET boost_mult=?,boost_until=? WHERE user_id=?",(mult,until,uid))
     conn.commit(); conn.close()
 
 def vip_status_text(uid):
     if uid==OWNER_ID:
         return "✅ (навсегда)"
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT vip_until FROM users WHERE user_id=?",(uid,))
     row=c.fetchone(); conn.close()
     if row and row[0]:
@@ -323,7 +362,7 @@ def get_income_per_hour(uid):
     return int(total * income_mult(uid))
 
 def collect_income(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT balance,last_collect FROM users WHERE user_id=?",(uid,))
     row = c.fetchone()
@@ -336,7 +375,7 @@ def collect_income(uid):
     conn.close(); return earned
 
 def upgrade_building(uid,bid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT level FROM buildings WHERE user_id=? AND building_id=?",(uid,bid))
     row = c.fetchone()
@@ -351,20 +390,20 @@ def upgrade_building(uid,bid):
     conn.commit(); conn.close(); return True,lvl+1
 
 def add_coins(uid,amount):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("UPDATE users SET balance=balance+? WHERE user_id=?",(amount,uid))
     conn.commit(); conn.close()
 
 def get_setting(key):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT value FROM settings WHERE key=?",(key,))
     row = c.fetchone(); conn.close()
     return row[0] if row else None
 
 def set_setting(key,value):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",(key,str(value)))
     conn.commit(); conn.close()
@@ -377,8 +416,13 @@ def get_min_withdraw():
     val = get_setting("min_withdraw")
     return int(val) if val else 50_000
 
+def get_owner_ton():
+    val = get_setting("owner_ton_daily")
+    try: return float(val) if val is not None else OWNER_TON_REWARD
+    except: return OWNER_TON_REWARD
+
 def do_mine(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT miner_level,last_mine FROM users WHERE user_id=?",(uid,))
     row = c.fetchone()
@@ -395,7 +439,7 @@ def do_mine(uid):
     conn.commit(); conn.close(); return True,"",reward
 
 def upgrade_miner(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT miner_level,balance FROM users WHERE user_id=?",(uid,))
     row = c.fetchone()
@@ -408,41 +452,45 @@ def upgrade_miner(uid):
     conn.commit(); conn.close(); return True,mlvl+1
 
 def init_crypto_mining(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     for ct in ["ton","city"]:
         c.execute("INSERT OR IGNORE INTO crypto_mining (user_id,crypto_type) VALUES (?,?)",(uid,ct))
     conn.commit(); conn.close()
 
 def get_crypto_mining(uid,ct):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT * FROM crypto_mining WHERE user_id=? AND crypto_type=?",(uid,ct))
     row = c.fetchone(); conn.close(); return row
 
 def do_crypto_mine(uid,ct):
     init_crypto_mining(uid)
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT level,balance,last_mine FROM crypto_mining WHERE user_id=? AND crypto_type=?",(uid,ct))
     row = c.fetchone()
     if not row: conn.close(); return False,"Не найдено",0
     lvl,bal,last_mine = row
-    if lvl==0: conn.close(); return False,"no_miner",0
+    is_owner_ton = (uid==OWNER_ID and ct=="ton")
+    if lvl==0 and not is_owner_ton: conn.close(); return False,"no_miner",0
     cd = CRYPTO_MINING[ct]["cooldown"]
     if last_mine:
         diff=(datetime.now()-datetime.fromisoformat(last_mine)).total_seconds()/3600
         if diff<cd:
             left=cd-diff; h,m=int(left),int((left%1)*60)
             conn.close(); return False,f"⏳ Через {h}ч {m}мин",0
-    reward = CRYPTO_MINING[ct]["levels"][lvl]["reward"] * crypto_mult(uid)
+    if is_owner_ton:
+        reward = get_owner_ton()
+    else:
+        reward = CRYPTO_MINING[ct]["levels"][lvl]["reward"] * crypto_mult(uid)
     c.execute("UPDATE crypto_mining SET balance=balance+?,last_mine=?,total_mined=total_mined+? WHERE user_id=? AND crypto_type=?",
               (reward,datetime.now().isoformat(),reward,uid,ct))
     conn.commit(); conn.close(); return True,"",reward
 
 def upgrade_crypto_miner(uid,ct):
     init_crypto_mining(uid)
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT level FROM crypto_mining WHERE user_id=? AND crypto_type=?",(uid,ct))
     row = c.fetchone()
@@ -459,7 +507,7 @@ def upgrade_crypto_miner(uid,ct):
     conn.commit(); conn.close(); return True,nl
 
 def do_slot(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT last_slot FROM users WHERE user_id=?",(uid,))
     row = c.fetchone()
@@ -477,7 +525,7 @@ def do_slot(uid):
     conn.commit(); conn.close(); return True,"",combo,reward
 
 def do_daily(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT last_daily,daily_streak FROM users WHERE user_id=?",(uid,))
     row = c.fetchone()
@@ -497,7 +545,7 @@ def do_daily(uid):
     conn.commit(); conn.close(); return True,"",streak,reward
 
 def do_attack(atk_id,def_id):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT last_attack,balance FROM users WHERE user_id=?",(atk_id,))
     row = c.fetchone()
@@ -528,7 +576,7 @@ def do_attack(atk_id,def_id):
         conn.commit(); conn.close(); return True,"loss",penalty
 
 def buy_shield(uid):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT balance FROM users WHERE user_id=?",(uid,))
     if c.fetchone()[0]<2000: conn.close(); return False,"Нужно 2000 🪙"
@@ -538,7 +586,7 @@ def buy_shield(uid):
     conn.commit(); conn.close(); return True,""
 
 def activate_shield(uid,hours):
-    conn = sqlite3.connect("city_empire.db")
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
     until=(datetime.now()+timedelta(hours=hours)).isoformat()
     c.execute("UPDATE users SET shield_until=? WHERE user_id=?",(until,uid))
@@ -548,7 +596,7 @@ def buy_army_unit(uid,unit_id,amount):
     unit=ARMY_UNITS.get(unit_id)
     if not unit: return False,"Юнит не найден"
     cost=unit["cost"]*amount
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT balance FROM users WHERE user_id=?",(uid,))
     if c.fetchone()[0]<cost: conn.close(); return False,f"Нужно {cost:,} 🪙"
     c.execute("UPDATE users SET balance=balance-? WHERE user_id=?",(cost,uid))
@@ -556,7 +604,7 @@ def buy_army_unit(uid,unit_id,amount):
     conn.commit(); conn.close(); return True,cost
 
 def create_clan(uid,name,desc=""):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     try:
         c.execute("INSERT INTO clans (name,leader_id,description) VALUES (?,?,?)",(name,uid,desc))
         clan_id=c.lastrowid
@@ -566,7 +614,7 @@ def create_clan(uid,name,desc=""):
         conn.close(); return False,"Клан уже существует!"
 
 def join_clan(uid,clan_id):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT clan_id FROM users WHERE user_id=?",(uid,))
     row=c.fetchone()
     if row and row[0]: conn.close(); return False,"Ты уже в клане!"
@@ -576,12 +624,12 @@ def join_clan(uid,clan_id):
     conn.commit(); conn.close(); return True,""
 
 def leave_clan(uid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE users SET clan_id=NULL WHERE user_id=?",(uid,))
     conn.commit(); conn.close(); return True,""
 
 def get_clan_info(clan_id):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT * FROM clans WHERE clan_id=?",(clan_id,))
     clan=c.fetchone()
     if not clan: conn.close(); return None,[]
@@ -589,54 +637,134 @@ def get_clan_info(clan_id):
     members=c.fetchall(); conn.close(); return clan,members
 
 def get_clan_list():
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("""SELECT c.clan_id,c.name,COUNT(u.user_id),SUM(u.balance)
                  FROM clans c LEFT JOIN users u ON u.clan_id=c.clan_id
                  GROUP BY c.clan_id ORDER BY SUM(u.balance) DESC LIMIT 8""")
     rows=c.fetchall(); conn.close(); return rows
 
 def get_referrals(uid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT COUNT(*) FROM users WHERE referrer_id=?",(uid,))
     cnt=c.fetchone()[0]; conn.close(); return cnt
 
 def get_top_users():
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT user_id,username,balance FROM users ORDER BY balance DESC LIMIT 10")
     rows=c.fetchall(); conn.close(); return rows
 
 def get_all_users():
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT user_id FROM users WHERE banned=0")
     rows=[r[0] for r in c.fetchall()]; conn.close(); return rows
 
 def create_withdrawal(uid,amount,wallet):
     usdt=round(amount*get_rate(),4)
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE users SET balance=balance-? WHERE user_id=?",(amount,uid))
     c.execute("INSERT INTO withdrawals (user_id,amount,usdt,wallet) VALUES (?,?,?,?)",(uid,amount,usdt,wallet))
     conn.commit(); conn.close(); return usdt
 
 def get_pending_withdrawals():
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT id,user_id,amount,usdt,wallet FROM withdrawals WHERE status='pending'")
     rows=c.fetchall(); conn.close(); return rows
 
 def approve_withdrawal(wid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE withdrawals SET status='approved' WHERE id=?",(wid,))
     conn.commit(); conn.close()
 
 def reject_withdrawal(wid,uid,amount):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE withdrawals SET status='rejected' WHERE id=?",(wid,))
     c.execute("UPDATE users SET balance=balance+? WHERE user_id=?",(amount,uid))
     conn.commit(); conn.close()
 
 def ban_user(uid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE users SET banned=1 WHERE user_id=?",(uid,))
     conn.commit(); conn.close()
+
+# ─────────────── КРИПТО-ВЫВОДЫ (TON / CITY) ───────────────
+def create_crypto_withdrawal(uid, ct, amount, address, memo=""):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE crypto_mining SET balance=balance-? WHERE user_id=? AND crypto_type=?",(amount,uid,ct))
+    c.execute("INSERT INTO crypto_withdrawals (user_id,crypto_type,amount,address,memo) VALUES (?,?,?,?,?)",
+              (uid,ct,amount,address,memo))
+    wid=c.lastrowid; conn.commit(); conn.close(); return wid
+
+def get_wd_today(uid, ct):
+    today=datetime.now().strftime("%Y-%m-%d")
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT amount FROM wd_limits WHERE user_id=? AND crypto_type=? AND day=?",(uid,ct,today))
+    row=c.fetchone(); conn.close()
+    return row[0] if row else 0.0
+
+def add_wd_today(uid, ct, amt):
+    today=datetime.now().strftime("%Y-%m-%d")
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT OR IGNORE INTO wd_limits (user_id,crypto_type,day,amount) VALUES (?,?,?,0)",(uid,ct,today))
+    c.execute("UPDATE wd_limits SET amount=amount+? WHERE user_id=? AND crypto_type=? AND day=?",(amt,uid,ct,today))
+    conn.commit(); conn.close()
+
+def sub_wd_today(uid, ct, amt):
+    today=datetime.now().strftime("%Y-%m-%d")
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE wd_limits SET amount=MAX(0,amount-?) WHERE user_id=? AND crypto_type=? AND day=?",(amt,uid,ct,today))
+    conn.commit(); conn.close()
+
+def get_crypto_withdrawal(wid):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT id,user_id,crypto_type,amount,address,memo,status FROM crypto_withdrawals WHERE id=?",(wid,))
+    row=c.fetchone(); conn.close(); return row
+
+def get_pending_crypto_withdrawals():
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT id,user_id,crypto_type,amount,address,memo FROM crypto_withdrawals WHERE status='pending'")
+    rows=c.fetchall(); conn.close(); return rows
+
+def set_crypto_withdrawal_status(wid, status, tx_hash=None):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE crypto_withdrawals SET status=?,tx_hash=? WHERE id=?",(status,tx_hash,wid))
+    conn.commit(); conn.close()
+
+def refund_crypto_withdrawal(wid):
+    row=get_crypto_withdrawal(wid)
+    if not row: return False
+    _,uid,ct,amount,_,_,status=row
+    if status!="pending": return False
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE crypto_mining SET balance=balance+? WHERE user_id=? AND crypto_type=?",(amount,uid,ct))
+    c.execute("UPDATE crypto_withdrawals SET status='rejected' WHERE id=?",(wid,))
+    conn.commit(); conn.close()
+    sub_wd_today(uid, ct, amount)
+    return True
+
+async def send_ton_onchain(address, amount, memo=""):
+    """
+    Реальная отправка TON с горячего кошелька. Включается только при TON_AUTOSEND=1
+    и заданном TON_WALLET_MNEMONIC. Требует: pip install tonutils
+    ВАЖНО:
+      • сначала протестируй на testnet (TON_NETWORK=testnet);
+      • версия кошелька (TON_WALLET_VERSION) должна совпадать с твоим реальным:
+        Tonkeeper по умолчанию = v5r1 (W5). Из одной сид-фразы v4r2 и v5r1
+        дают РАЗНЫЕ адреса — иначе бот возьмёт пустой адрес.
+    Возвращает tx_hash (str) или бросает исключение.
+    """
+    from tonutils.client import ToncenterV3Client
+    from tonutils.wallet import WalletV4R2, WalletV5R1
+    is_testnet = (TON_NETWORK.lower() == "testnet")
+    client = ToncenterV3Client(
+        api_key=(TONCENTER_KEY or None),
+        is_testnet=is_testnet,
+        rps=1, max_retries=1,
+    )
+    ver = TON_WALLET_VERSION.lower()
+    WalletCls = WalletV5R1 if ver in ("v5", "v5r1", "w5") else WalletV4R2
+    wallet, _pub, _priv, _mn = WalletCls.from_mnemonic(client, TON_MNEMONIC.split())
+    tx_hash = await wallet.transfer(destination=address, amount=float(amount), body=memo or "")
+    return str(tx_hash)
 
 # ─────────────── ЛОГИКА ЗАДАНИЙ ───────────────
 def _today():
@@ -644,14 +772,14 @@ def _today():
 
 def quest_progress(uid, qid, amount=1):
     if qid not in DAILY_QUESTS: return
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     today=_today()
     c.execute("INSERT OR IGNORE INTO quests (user_id,quest_id,quest_date,progress,claimed) VALUES (?,?,?,0,0)",(uid,qid,today))
     c.execute("UPDATE quests SET progress=progress+? WHERE user_id=? AND quest_id=? AND quest_date=?",(amount,uid,qid,today))
     conn.commit(); conn.close()
 
 def get_quests(uid):
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     today=_today(); result={}
     for qid in DAILY_QUESTS:
         c.execute("SELECT progress,claimed FROM quests WHERE user_id=? AND quest_id=? AND quest_date=?",(uid,qid,today))
@@ -662,7 +790,7 @@ def get_quests(uid):
 def claim_quest(uid, qid):
     if qid not in DAILY_QUESTS: return False,"Задание не найдено",0
     q=DAILY_QUESTS[qid]
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     today=_today()
     c.execute("SELECT progress,claimed FROM quests WHERE user_id=? AND quest_id=? AND quest_date=?",(uid,qid,today))
     row=c.fetchone()
@@ -678,7 +806,7 @@ def claim_all_bonus(uid):
     qs=get_quests(uid)
     if not all(qs[qid]["claimed"] for qid in DAILY_QUESTS):
         return False,"Сначала забери все задания",0
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     today=_today()
     c.execute("SELECT claimed FROM quests WHERE user_id=? AND quest_id='_allbonus' AND quest_date=?",(uid,today))
     row=c.fetchone()
@@ -687,6 +815,48 @@ def claim_all_bonus(uid):
     c.execute("UPDATE quests SET claimed=1 WHERE user_id=? AND quest_id='_allbonus' AND quest_date=?",(uid,today))
     c.execute("UPDATE users SET balance=balance+? WHERE user_id=?",(QUEST_ALL_BONUS,uid))
     conn.commit(); conn.close(); return True,"",QUEST_ALL_BONUS
+
+# ─────────────── НАГРАДЫ ИЗ ИГРЫ (считает СЕРВЕР, анти-чит) ───────────────
+GAME_MAX_LEVELS_PER_CLAIM = 12      # за один заход начисляем не больше N новых уровней
+GAME_DAILY_CITY_CAP       = 50_000  # дневной лимит CITY из игры
+
+def game_level_reward(L):
+    """Сколько CITY даём за ПЕРВОЕ прохождение уровня L. Формулу контролирует бот."""
+    return 100 + L*40
+
+def game_get(uid):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT OR IGNORE INTO game_progress (user_id) VALUES (?)",(uid,))
+    c.execute("SELECT best_level,total_city,last_day,day_earned FROM game_progress WHERE user_id=?",(uid,))
+    row=c.fetchone(); conn.commit(); conn.close()
+    return row if row else (0,0,None,0)
+
+def game_claim(uid, claimed_level):
+    """Начисляет CITY за новые уровни (выводимый, с дневным лимитом на вывод).
+    Сумму считает сервер — клиент лишь сообщает уровень."""
+    try: claimed_level=int(claimed_level)
+    except: claimed_level=0
+    if claimed_level<1: return 0,0,"badlevel"
+    init_crypto_mining(uid)
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT OR IGNORE INTO game_progress (user_id) VALUES (?)",(uid,))
+    c.execute("SELECT best_level,last_day,day_earned FROM game_progress WHERE user_id=?",(uid,))
+    best,last_day,day_earned=c.fetchone()
+    today=datetime.now().strftime("%Y-%m-%d")
+    if last_day!=today: day_earned=0
+    new_top=min(claimed_level, best+GAME_MAX_LEVELS_PER_CLAIM)
+    if new_top<=best:
+        conn.close(); return 0,best,"replay"
+    reward=sum(game_level_reward(L) for L in range(best+1,new_top+1))
+    remaining=max(0,GAME_DAILY_CITY_CAP-day_earned)
+    capped=min(reward,remaining)
+    status="capped" if capped<reward else "ok"
+    c.execute("UPDATE crypto_mining SET balance=balance+?,total_mined=total_mined+? WHERE user_id=? AND crypto_type='city'",
+              (capped,capped,uid))
+    c.execute("UPDATE game_progress SET best_level=?,total_city=total_city+?,last_day=?,day_earned=? WHERE user_id=?",
+              (new_top,capped,today,day_earned+capped,uid))
+    conn.commit(); conn.close()
+    return capped,new_top,status
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher()
@@ -698,10 +868,11 @@ def main_menu():
         [KeyboardButton(text="💰 Собрать"),     KeyboardButton(text="⛏️ Майнинг")],
         [KeyboardButton(text="💎 Крипто"),      KeyboardButton(text="🎰 Слот")],
         [KeyboardButton(text="🎁 Бонус"),       KeyboardButton(text="⚔️ Атака")],
-        [KeyboardButton(text="📋 Задания"),     KeyboardButton(text="🎮 Играть")],
-        [KeyboardButton(text="🏰 Клан"),        KeyboardButton(text="🛒 Магазин")],
-        [KeyboardButton(text="💸 Вывод"),       KeyboardButton(text="👥 Рефералы")],
-        [KeyboardButton(text="🏆 Рейтинг"),     KeyboardButton(text="ℹ️ Помощь")],
+        [KeyboardButton(text="📋 Задания"),     KeyboardButton(text="🏰 Клан")],
+        [KeyboardButton(text="🛒 Магазин"),     KeyboardButton(text="💸 Вывод")],
+        [KeyboardButton(text="👥 Рефералы"),    KeyboardButton(text="🏆 Рейтинг")],
+        [KeyboardButton(text="ℹ️ Помощь")],
+        [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=GAME_URL))],
     ],resize_keyboard=True)
 
 def buildings_kb(uid):
@@ -736,6 +907,7 @@ def admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика",        callback_data="adm_stats")],
         [InlineKeyboardButton(text="💸 Заявки на вывод",   callback_data="adm_withdrawals")],
+        [InlineKeyboardButton(text="💎 Крипто-заявки",     callback_data="adm_cwd")],
         [InlineKeyboardButton(text="📢 Рассылка",          callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="💱 Управление курсом", callback_data="adm_rates")],
     ])
@@ -854,11 +1026,12 @@ async def crypto_menu(msg: types.Message):
     city_lvl=city_m[2] if city_m else 0; city_bal=city_m[3] if city_m else 0
     cm=crypto_mult(uid)
     ton_rwd=CRYPTO_MINING["ton"]["levels"][ton_lvl]["reward"]*cm if ton_lvl>0 else 0
+    if uid==OWNER_ID: ton_rwd=get_owner_ton()
     city_rwd=CRYPTO_MINING["city"]["levels"][city_lvl]["reward"]*cm if city_lvl>0 else 0
     text=(f"💎 *КРИПТО-МАЙНИНГ*\n{'═'*28}\n"
           f"🔷 *TON Майнер* {star_level(ton_lvl)}\n"
           f"📊 {progress_bar(ton_lvl,5)}\n"
-          f"💰 Добыча: *{ton_rwd} TON* / 24ч\n"
+          f"💰 Добыча: *{round(ton_rwd,3)} TON* / 24ч\n"
           f"💼 Баланс: *{round(ton_bal,6)} TON*\n")
     if ton_lvl<5: text+=f"⬆️ Апгрейд: *{format_coins(CRYPTO_MINING['ton']['levels'][ton_lvl+1]['cost_city'])}* 🪙\n"
     text+=(f"{'─'*28}\n🟡 *CITY Майнер* {star_level(city_lvl)}\n"
@@ -866,7 +1039,8 @@ async def crypto_menu(msg: types.Message):
            f"💰 Добыча: *{city_rwd} CITY* / 12ч\n"
            f"💼 Баланс: *{round(city_bal,2)} CITY*\n")
     if city_lvl<5: text+=f"⬆️ Апгрейд: *{format_coins(CRYPTO_MINING['city']['levels'][city_lvl+1]['cost_coins'])}* 🪙\n"
-    text+=f"{'─'*28}\n👑 VIP = x2 добыча!\n{'═'*28}"
+    text+=(f"{'─'*28}\n👑 VIP = x2 добыча!\n"
+           f"💸 Лимит вывода: *{int(CITY_DAILY_WD_CAP)} CITY* / *{TON_DAILY_WD_CAP} TON* в сутки\n{'═'*28}")
     kb=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔷 Добыть TON",   callback_data="cmine_ton"),
          InlineKeyboardButton(text="🟡 Добыть CITY",  callback_data="cmine_city")],
@@ -883,10 +1057,10 @@ async def crypto_mine_cb(call: types.CallbackQuery):
     ok,err,reward=do_crypto_mine(uid,ct); info=CRYPTO_MINING[ct]
     if ok:
         row=get_crypto_mining(uid,ct); bal=row[3] if row else 0
-        await call.answer(f"✅ Добыто {reward} {info['symbol']}!",show_alert=True)
+        await call.answer(f"✅ Добыто {round(reward,3)} {info['symbol']}!",show_alert=True)
         await call.message.edit_text(
             f"{'🔷' if ct=='ton' else '🟡'} *ДОБЫЧА УСПЕШНА!*\n{'═'*28}\n"
-            f"💰 Добыто: *+{reward} {info['symbol']}*\n"
+            f"💰 Добыто: *+{round(reward,3)} {info['symbol']}*\n"
             f"💼 Баланс: *{round(bal,6)} {info['symbol']}*\n"
             f"⏳ Следующая через *{info['cooldown']}ч*\n{'═'*28}",
             parse_mode="Markdown",reply_markup=call.message.reply_markup
@@ -913,34 +1087,58 @@ async def crypto_upgrade_cb(call: types.CallbackQuery):
 async def crypto_withdraw_prompt(call: types.CallbackQuery):
     uid=call.from_user.id; ct=call.data.split("_",1)[1]
     info=CRYPTO_MINING[ct]; row=get_crypto_mining(uid,ct); bal=row[3] if row else 0
-    min_w=0.001 if ct=="ton" else 100
-    # TON вывод только для VIP
-    if ct=="ton" and not is_vip(uid):
+    min_w=TON_MIN_WD if ct=="ton" else CITY_MIN_WD
+    cap=TON_DAILY_WD_CAP if ct=="ton" else CITY_DAILY_WD_CAP
+    used=get_wd_today(uid,ct)
+    # TON вывод только для VIP (если включено)
+    if ct=="ton" and TON_VIP_ONLY and not is_vip(uid):
         await call.answer(
             "❌ Вывод TON только для VIP игроков!\n\nКупи VIP в 🛒 Магазине!",
             show_alert=True
         )
         return
+    if ct=="ton":
+        extra=(f"{'─'*28}\n"
+               f"🏦 Биржи с TON: Binance, OKX, Bybit,\n"
+               f"   KuCoin, Bitget, Gate.io, Kraken\n"
+               f"📱 Или @wallet прямо в Telegram\n"
+               f"🌐 Сеть при выводе: *TON*\n"
+               f"⚠️ Для биржи MEMO/комментарий ОБЯЗАТЕЛЕН,\n"
+               f"   иначе монеты потеряются!\n"
+               f"{'─'*28}\n"
+               f"На биржу:\n`/cwithdraw ton АДРЕС МЕМО`\n"
+               f"На свой кошелёк (без MEMO):\n`/cwithdraw ton АДРЕС`\n")
+    else:
+        extra=(f"{'─'*28}\n"
+               f"ℹ️ CITY на биржах нет.\n"
+               f"Выводи на свой TON-кошелёк, затем\n"
+               f"меняй CITY→TON на DeDust.io или STON.fi.\n"
+               f"{'─'*28}\n"
+               f"Команда:\n`/cwithdraw city АДРЕС`\n")
     await call.message.answer(
         f"💸 *Вывод {info['symbol']}*\n{'═'*28}\n"
         f"💼 Баланс: *{round(bal,6)} {info['symbol']}*\n"
         f"📌 Минимум: *{min_w} {info['symbol']}*\n"
-        f"{'─'*28}\n"
-        f"{'👑 VIP привилегия!' if ct=='ton' else '✅ Доступно всем!'}\n"
-        f"{'─'*28}\n"
-        f"Команда:\n`/cwithdraw {ct} ВАШ_TON_АДРЕС`\n{'═'*28}",
+        f"📊 Лимит: *{cap} {info['symbol']}* / сутки (сегодня {round(used,6)})\n"
+        f"{extra}{'═'*28}",
         parse_mode="Markdown"
     )
     await call.answer()
 
 @dp.message(Command("cwithdraw"))
 async def crypto_withdraw_cmd(msg: types.Message):
-    uid=msg.from_user.id; parts=msg.text.split()
-    if len(parts)!=3: return await msg.answer("Формат: `/cwithdraw ton АДРЕС`",parse_mode="Markdown")
-    ct=parts[1].lower(); wallet=parts[2]
-    if ct not in ["ton","city"]: return await msg.answer("❌ Тип: `ton` или `city`",parse_mode="Markdown")
-    # TON вывод только для VIP
-    if ct=="ton" and not is_vip(uid):
+    uid=msg.from_user.id; parts=msg.text.split(maxsplit=3)
+    if len(parts)<3:
+        return await msg.answer(
+            "Формат: `/cwithdraw ton АДРЕС МЕМО`\n"
+            "Для биржи MEMO обязателен!\n"
+            "Для своего кошелька: `/cwithdraw ton АДРЕС`",
+            parse_mode="Markdown")
+    ct=parts[1].lower(); wallet=parts[2]; memo=parts[3] if len(parts)>3 else ""
+    if ct not in ["ton","city"]:
+        return await msg.answer("❌ Тип: `ton` или `city`",parse_mode="Markdown")
+    # TON вывод только для VIP (если включено)
+    if ct=="ton" and TON_VIP_ONLY and not is_vip(uid):
         return await msg.answer(
             f"❌ *Вывод TON только для VIP!*\n{'═'*28}\n"
             f"👑 Купи VIP в 🛒 Магазине\n"
@@ -949,28 +1147,97 @@ async def crypto_withdraw_cmd(msg: types.Message):
             parse_mode="Markdown"
         )
     info=CRYPTO_MINING[ct]; row=get_crypto_mining(uid,ct); bal=row[3] if row else 0
-    min_w=0.001 if ct=="ton" else 100
-    if bal<min_w: return await msg.answer(f"❌ Минимум: {min_w} {info['symbol']}")
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
-    c.execute("UPDATE crypto_mining SET balance=0 WHERE user_id=? AND crypto_type=?",(uid,ct))
-    conn.commit(); conn.close()
+    min_w=TON_MIN_WD if ct=="ton" else CITY_MIN_WD
+    cap = TON_DAILY_WD_CAP if ct=="ton" else CITY_DAILY_WD_CAP
+    used = get_wd_today(uid, ct)
+    remaining = max(0.0, cap - used)
+    if remaining <= 0:
+        return await msg.answer(
+            f"❌ Дневной лимит вывода {info['symbol']} исчерпан: *{cap}* за сутки.\n"
+            f"💼 На балансе: {round(bal,6)} {info['symbol']} — выведешь завтра!",
+            parse_mode="Markdown")
+    amount = min(bal, remaining)
+    if amount < min_w:
+        return await msg.answer(
+            f"❌ Доступно к выводу сейчас: *{round(amount,6)} {info['symbol']}*\n"
+            f"Минимум: {min_w}. Дневной лимит: {cap} (исп. сегодня {round(used,6)}).\n"
+            f"💼 На балансе: {round(bal,6)} {info['symbol']}",
+            parse_mode="Markdown")
+    wid=create_crypto_withdrawal(uid,ct,amount,wallet,memo)
+    add_wd_today(uid, ct, amount)
+    left=round(bal-amount,6)
+    memo_line=(f"📝 MEMO: `{memo}`\n" if memo else "⚠️ Без MEMO — для биржи это потеря средств!\n")
     await msg.answer(
-        f"✅ *ЗАЯВКА НА ВЫВОД {info['symbol']}!*\n{'═'*28}\n"
-        f"💰 Сумма: *{round(bal,6)} {info['symbol']}*\n"
-        f"👛 Адрес: `{wallet[:12]}...`\n"
+        f"✅ *ЗАЯВКА #{wid} НА ВЫВОД {info['symbol']}!*\n{'═'*28}\n"
+        f"💰 Сумма: *{round(amount,6)} {info['symbol']}*\n"
+        f"👛 Адрес: `{wallet}`\n"
+        f"{memo_line}"
         f"{'─'*28}\n"
-        f"{'👑 VIP вывод TON!' if ct=='ton' else '🟡 Вывод CITY токенов!'}\n"
-        f"⏳ Ожидай подтверждения\n{'═'*28}",
+        f"📊 Дневной лимит: {round(used+amount,6)} / {cap}\n"
+        f"💼 Остаток на балансе: {left} {info['symbol']}\n"
+        f"⏳ Ожидай обработки\n{'═'*28}",
         parse_mode="Markdown"
     )
+    kb=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Отправить", callback_data=f"cwapprove_{wid}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"cwreject_{wid}")
+    ]])
     await bot.send_message(OWNER_ID,
-        f"🔔 *ВЫВОД {info['symbol']}!*\n\n"
+        f"🔔 *КРИПТО-ВЫВОД #{wid}* {info['symbol']}\n\n"
         f"👤 ID: `{uid}`\n"
-        f"💰 {round(bal,6)} {info['symbol']}\n"
-        f"👛 `{wallet}`\n"
-        f"{'👑 VIP игрок' if ct=='ton' else '🟡 CITY вывод'}",
-        parse_mode="Markdown"
+        f"💰 {round(amount,6)} {info['symbol']}\n"
+        f"👛 `{wallet}`\n{memo_line}"
+        f"{'👑 VIP' if ct=='ton' else '🟡 CITY'}",
+        parse_mode="Markdown", reply_markup=kb
     )
+
+@dp.callback_query(lambda c: c.data.startswith("cwapprove_"))
+async def cwapprove(call: types.CallbackQuery):
+    if call.from_user.id!=OWNER_ID: return
+    wid=int(call.data.split("_")[1])
+    row=get_crypto_withdrawal(wid)
+    if not row: return await call.answer("Заявка не найдена",show_alert=True)
+    _,uid,ct,amount,address,memo,status=row
+    if status!="pending": return await call.answer("Уже обработано",show_alert=True)
+    info=CRYPTO_MINING[ct]
+    # авто-отправка TON on-chain (если включена)
+    if ct=="ton" and TON_AUTOSEND and TON_MNEMONIC:
+        await call.answer("⛓️ Отправляю on-chain...")
+        try:
+            tx=await send_ton_onchain(address,amount,memo)
+            set_crypto_withdrawal_status(wid,"sent",tx)
+            await call.message.edit_text(f"✅ #{wid} отправлено on-chain.\n🔗 `{tx}`",parse_mode="Markdown")
+            try: await bot.send_message(uid,
+                f"✅ *Вывод #{wid} отправлен!*\n💰 {round(amount,6)} {info['symbol']}\n🔗 tx: `{tx}`",
+                parse_mode="Markdown")
+            except: pass
+            return
+        except Exception as e:
+            await call.message.edit_text(
+                f"⚠️ Авто-отправка #{wid} не удалась:\n`{e}`\n\nОтправь вручную, заявка осталась в статусе pending.",
+                parse_mode="Markdown")
+            return
+    # ручной режим
+    set_crypto_withdrawal_status(wid,"approved")
+    await call.message.edit_text(f"✅ Заявка #{wid} одобрена. Отправь {round(amount,6)} {info['symbol']} вручную.")
+    try: await bot.send_message(uid,
+        f"✅ *Вывод #{wid} одобрен!*\n💰 {round(amount,6)} {info['symbol']} скоро придёт на "
+        f"{'биржу' if memo else 'кошелёк'}.",
+        parse_mode="Markdown")
+    except: pass
+
+@dp.callback_query(lambda c: c.data.startswith("cwreject_"))
+async def cwreject(call: types.CallbackQuery):
+    if call.from_user.id!=OWNER_ID: return
+    wid=int(call.data.split("_")[1])
+    row=get_crypto_withdrawal(wid)
+    if refund_crypto_withdrawal(wid):
+        uid=row[1]
+        await call.message.edit_text(f"❌ Заявка #{wid} отклонена, средства возвращены игроку.")
+        try: await bot.send_message(uid,f"❌ Вывод #{wid} отклонён. Монеты возвращены на крипто-баланс.")
+        except: pass
+    else:
+        await call.answer("Уже обработано",show_alert=True)
 
 @dp.message(lambda m: m.text=="🎰 Слот")
 async def slot_menu(msg: types.Message):
@@ -1253,7 +1520,7 @@ async def successful_payment(msg: types.Message):
         activate_shield(uid,item.get("shield_hours",24))
         text=f"✅ *Щит* на {item.get('shield_hours')}ч! 🛡️"
     elif item_id=="army_pack":
-        conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+        conn=sqlite3.connect(DB); c=conn.cursor()
         c.execute("UPDATE army SET amount=amount+100 WHERE user_id=? AND unit_id='soldier'",(uid,))
         c.execute("UPDATE army SET amount=amount+50 WHERE user_id=? AND unit_id='knight'",(uid,))
         conn.commit(); conn.close()
@@ -1311,19 +1578,21 @@ async def referrals(msg: types.Message):
     )
 
 @dp.message(Command("play"))
-@dp.message(lambda m: m.text and ("играть" in m.text.lower() or "🎮" in m.text))
+@dp.message(lambda m: m.text and "играть" in m.text.lower())
 async def play_game(msg: types.Message):
     uid  = msg.from_user.id
     user = get_user(uid)
     if not user:
         create_user(uid, msg.from_user.username or msg.from_user.first_name)
         user = get_user(uid)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="🎮 Открыть CityEmpire Match",
-            web_app=types.WebAppInfo(url=f"{GAME_URL}?uid={uid}")
-        )
-    ]])
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎮 Открыть CityEmpire Match",
+                            web_app=types.WebAppInfo(url=GAME_URL))],
+            [KeyboardButton(text="🔙 Меню")],
+        ],
+        resize_keyboard=True
+    )
     await msg.answer(
         f"🎮 *CITYEMPIRE MATCH*\n"
         f"{'═'*28}\n"
@@ -1335,38 +1604,56 @@ async def play_game(msg: types.Message):
         f"🏆 Собирай звёзды\n"
         f"{'─'*28}\n"
         f"💰 Баланс: *{format_coins(user[2])}* 🪙\n"
-        f"{'═'*28}",
+        f"{'═'*28}\n"
+        f"👇 Нажми кнопку, чтобы играть",
         parse_mode="Markdown",
         reply_markup=kb
     )
+
+@dp.message(lambda m: m.text=="🔙 Меню")
+async def back_to_menu(msg: types.Message):
+    await msg.answer("🏙️ Главное меню",reply_markup=main_menu())
 
 @dp.message(lambda m: m.web_app_data is not None)
 async def web_app_data_handler(msg: types.Message):
     uid = msg.from_user.id
     try:
         data = json.loads(msg.web_app_data.data)
-        if data.get('action') == 'withdraw':
-            amount = int(data.get('amount', 0))
-            if amount > 0:
-                add_coins(uid, amount)
-                user = get_user(uid)
+        action = data.get('action')
+        if action in ('claim','level_complete','withdraw'):
+            level = data.get('level', data.get('best_level'))
+            if level is None:
+                # старый клиент слал сумму напрямую — больше не доверяем
                 await msg.answer(
-                    f"🎮 *CITY монеты из игры получены!*\n"
-                    f"{'═'*28}\n"
-                    f"🪙 Начислено: *+{format_coins(amount)}* CITY\n"
-                    f"💼 Баланс: *{format_coins(user[2])}* 🪙\n"
-                    f"{'─'*28}\n"
-                    f"📈 Продай CITY на DeDust.io!\n"
-                    f"{'═'*28}",
-                    parse_mode="Markdown"
+                    "🔄 Обнови игру: теперь награды считает сервер.\n"
+                    "Открой 🎮 Играть заново — прогресс не потеряется.",
+                    reply_markup=main_menu()
                 )
-                await bot.send_message(OWNER_ID,
-                    f"🎮 *Вывод из игры!*\n\n"
-                    f"👤 ID: `{uid}`\n"
-                    f"🪙 +{format_coins(amount)} CITY",
-                    parse_mode="Markdown"
+                return
+            reward, top, status = game_claim(uid, level)
+            if reward <= 0:
+                await msg.answer(
+                    f"🎮 *Прогресс сохранён* — лучший уровень *{top}*.\n"
+                    f"Новых наград пока нет: пройди дальше, чтобы заработать ещё CITY!",
+                    parse_mode="Markdown", reply_markup=main_menu()
                 )
-    except: pass
+                return
+            cm = get_crypto_mining(uid,'city'); bal = cm[3] if cm else 0
+            note = "\n⚠️ Достигнут дневной лимит начисления — остальное завтра." if status=="capped" else ""
+            await msg.answer(
+                f"🎮 *НАГРАДА ИЗ ИГРЫ!*\n{'═'*28}\n"
+                f"🏆 Лучший уровень: *{top}*\n"
+                f"🪙 Начислено: *+{format_coins(reward)} CITY*\n"
+                f"💼 CITY-баланс: *{round(bal,2)} CITY*{note}\n{'─'*28}\n"
+                f"📈 Выводи в 💎 Крипто (есть дневной лимит вывода)\n{'═'*28}",
+                parse_mode="Markdown", reply_markup=main_menu()
+            )
+            await bot.send_message(OWNER_ID,
+                f"🎮 *Награда из игры*\n👤 `{uid}`\n🏆 ур.{top}\n🪙 +{format_coins(reward)} CITY",
+                parse_mode="Markdown"
+            )
+    except Exception:
+        pass
 
 @dp.message(lambda m: m.text=="🏆 Рейтинг")
 async def rating(msg: types.Message):
@@ -1387,7 +1674,8 @@ async def help_msg(msg: types.Message):
         f"⚔️ Атакуй игроков\n🏰 Вступи в клан\n"
         f"🛒 VIP и бусты\n💸 Вывод от {format_coins(get_min_withdraw())} 🪙\n{'─'*28}\n"
         f"`/attack ID` — атака\n`/createclan ИМЯ` — клан\n"
-        f"`/withdraw КОШЕЛЁК СУММА`\n`/cwithdraw ton/city АДРЕС`\n{'═'*28}",
+        f"`/withdraw КОШЕЛЁК СУММА`\n`/cwithdraw ton/city АДРЕС МЕМО`\n"
+        f"(MEMO нужен для биржи!)\n{'═'*28}",
         parse_mode="Markdown"
     )
 
@@ -1454,7 +1742,7 @@ async def mine_upgrade(call: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data=="adm_stats")
 async def adm_stats(call: types.CallbackQuery):
     if call.from_user.id!=OWNER_ID: return
-    conn=sqlite3.connect("city_empire.db"); c=conn.cursor()
+    conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT COUNT(*) FROM users"); total=c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM users WHERE banned=1"); banned=c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'"); pending=c.fetchone()[0]
@@ -1482,6 +1770,23 @@ async def adm_withdrawals(call: types.CallbackQuery):
         ]])
         await call.message.answer(f"💸 *Заявка #{wid}*\n👤 `{uid}`\n💰 {format_coins(amount)} = {usdt} USDT\n👛 `{wallet}`",parse_mode="Markdown",reply_markup=kb)
 
+@dp.callback_query(lambda c: c.data=="adm_cwd")
+async def adm_cwd(call: types.CallbackQuery):
+    if call.from_user.id!=OWNER_ID: return
+    rows=get_pending_crypto_withdrawals()
+    if not rows: return await call.answer("Нет крипто-заявок!",show_alert=True)
+    for wid,uid,ct,amount,address,memo in rows:
+        sym=CRYPTO_MINING[ct]['symbol']
+        memo_line=f"\n📝 MEMO: `{memo}`" if memo else "\n⚠️ без MEMO"
+        kb=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Отправить",callback_data=f"cwapprove_{wid}"),
+            InlineKeyboardButton(text="❌ Отклонить",callback_data=f"cwreject_{wid}")
+        ]])
+        await call.message.answer(
+            f"💎 *Заявка #{wid}* — {ct.upper()}\n"
+            f"👤 `{uid}`\n💰 {round(amount,6)} {sym}\n👛 `{address}`{memo_line}",
+            parse_mode="Markdown",reply_markup=kb)
+
 @dp.callback_query(lambda c: c.data.startswith("wapprove_"))
 async def wapprove(call: types.CallbackQuery):
     if call.from_user.id!=OWNER_ID: return
@@ -1506,9 +1811,11 @@ async def adm_rates(call: types.CallbackQuery):
     await call.message.edit_text(
         f"💱 *УПРАВЛЕНИЕ КУРСОМ*\n{'═'*28}\n"
         f"📈 1,000 🪙 = *{round(rate*1000,4)}$*\n"
-        f"📉 Мин. вывод: *{format_coins(min_w)}* 🪙\n{'─'*28}\n"
+        f"📉 Мин. вывод: *{format_coins(min_w)}* 🪙\n"
+        f"🔷 Твой TON-майнинг: *{get_owner_ton()}* TON/сутки\n{'─'*28}\n"
         f"`/setrate 0.00002` — изменить курс\n"
-        f"`/setminw 100000` — мин. вывод\n{'═'*28}",
+        f"`/setminw 100000` — мин. вывод\n"
+        f"`/setownerton 15` — твоя ставка TON\n{'═'*28}",
         parse_mode="Markdown",reply_markup=rates_kb()
     )
 
@@ -1562,6 +1869,23 @@ async def set_minw_cmd(msg: types.Message):
     old_min=get_min_withdraw(); set_setting("min_withdraw",new_min)
     await msg.answer(f"✅ Мин.вывод: *{format_coins(old_min)}* → *{format_coins(new_min)}* 🪙",parse_mode="Markdown")
 
+@dp.message(Command("setownerton"))
+async def set_owner_ton_cmd(msg: types.Message):
+    if msg.from_user.id!=OWNER_ID: return
+    parts=msg.text.split()
+    if len(parts)!=2: return await msg.answer("Формат: `/setownerton 15`",parse_mode="Markdown")
+    try:
+        val=float(parts[1])
+        if val<0: raise ValueError
+    except: return await msg.answer("❌ Неверное значение.")
+    old=get_owner_ton(); set_setting("owner_ton_daily",val)
+    await msg.answer(
+        f"✅ *Твоя ставка TON-майнинга обновлена!*\n{'═'*28}\n"
+        f"Было: *{old} TON* / сутки\n"
+        f"Стало: *{val} TON* / сутки\n{'═'*28}",
+        parse_mode="Markdown"
+    )
+
 @dp.message(Command("broadcast"))
 async def broadcast(msg: types.Message):
     if msg.from_user.id!=OWNER_ID: return
@@ -1598,6 +1922,29 @@ async def give_vip(msg: types.Message):
     await msg.answer(f"✅ VIP на *{days}* дн. выдан `{uid}`.",parse_mode="Markdown")
     try: await bot.send_message(uid,f"👑 *Тебе выдан VIP на {days} дн.!* Доход x2!",parse_mode="Markdown")
     except: pass
+
+@dp.message(Command("stars"))
+async def stars_balance_cmd(msg: types.Message):
+    if msg.from_user.id!=OWNER_ID: return
+    try:
+        bal = await bot.get_my_star_balance()
+        amt = getattr(bal, "amount", bal)
+        usd = round(int(amt)*0.013, 2)
+        await msg.answer(
+            f"⭐ *ДОХОД В STARS*\n{'═'*28}\n"
+            f"💫 Баланс бота: *{amt}* ⭐\n"
+            f"💵 ≈ *${usd}* по курсу выплат\n{'─'*28}\n"
+            f"📤 Вывод: Telegram → Настройки → Мои Stars → Вывести\n"
+            f"   (через Fragment в TON, потом на биржу)\n"
+            f"📌 Условия: от *1000* ⭐ и через *21 день* после получения\n{'═'*28}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await msg.answer(
+            f"❌ Не удалось получить баланс Stars.\n"
+            f"Нужна свежая версия aiogram (3.13+). Обнови в requirements.txt.\n`{e}`",
+            parse_mode="Markdown"
+        )
 
 @dp.message(Command("ban"))
 async def ban(msg: types.Message):
