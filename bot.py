@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                             ReplyKeyboardMarkup, KeyboardButton)
 
-BOT_TOKEN = "8851197874:AAF16N6K3HPN4roucNRbSCTDH0d-fz1lugA"   # 👈 ЗАМЕНИ НА ТОКЕН ОТ @BotFather
+BOT_TOKEN = "ВАШ_ТОКЕН_СЮДА"   # 👈 ЗАМЕНИ НА ТОКЕН ОТ @BotFather
 OWNER_ID  = 976860643
 
 COIN_TO_USDT    = 0.00001
