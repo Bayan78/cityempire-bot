@@ -2,13 +2,15 @@ import logging
 import sqlite3
 import asyncio
 import random
+import os
+import json
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                             ReplyKeyboardMarkup, KeyboardButton)
 
-BOT_TOKEN = "ВАШ_ТОКЕН_СЮДА"   # 👈 ЗАМЕНИ НА ТОКЕН ОТ @BotFather
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID  = 976860643
 
 COIN_TO_USDT    = 0.00001
@@ -1080,6 +1082,61 @@ async def referrals(msg: types.Message):
         f"🔗 Ссылка:\n`{link}`\n{'═'*28}",
         parse_mode="Markdown"
     )
+
+@dp.message(lambda m: m.text=="🎮 Играть")
+async def play_game(msg: types.Message):
+    uid  = msg.from_user.id
+    user = get_user(uid)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🎮 Открыть CityEmpire Match",
+            web_app=types.WebAppInfo(url=f"{GAME_URL}?uid={uid}")
+        )
+    ]])
+    await msg.answer(
+        f"🎮 *CITYEMPIRE MATCH*\n"
+        f"{'═'*28}\n"
+        f"🧙 Волшебник ждёт тебя!\n"
+        f"{'─'*28}\n"
+        f"⭐ Проходи уровни матч-3\n"
+        f"🪙 Зарабатывай CITY монеты\n"
+        f"💣 Используй бустеры\n"
+        f"🏆 Собирай звёзды\n"
+        f"{'─'*28}\n"
+        f"💰 Баланс: *{format_coins(user[2])}* 🪙\n"
+        f"{'═'*28}",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+@dp.message(lambda m: m.web_app_data is not None)
+async def web_app_data_handler(msg: types.Message):
+    import json
+    uid = msg.from_user.id
+    try:
+        data = json.loads(msg.web_app_data.data)
+        if data.get('action') == 'withdraw':
+            amount = int(data.get('amount', 0))
+            if amount > 0:
+                add_coins(uid, amount)
+                user = get_user(uid)
+                await msg.answer(
+                    f"🎮 *CITY монеты из игры получены!*\n"
+                    f"{'═'*28}\n"
+                    f"🪙 Начислено: *+{format_coins(amount)}* CITY\n"
+                    f"💼 Баланс: *{format_coins(user[2])}* 🪙\n"
+                    f"{'─'*28}\n"
+                    f"📈 Продай CITY на DeDust.io!\n"
+                    f"{'═'*28}",
+                    parse_mode="Markdown"
+                )
+                await bot.send_message(OWNER_ID,
+                    f"🎮 *Вывод из игры!*\n\n"
+                    f"👤 ID: `{uid}`\n"
+                    f"🪙 +{format_coins(amount)} CITY",
+                    parse_mode="Markdown"
+                )
+    except: pass
 
 @dp.message(lambda m: m.text=="🏆 Рейтинг")
 async def rating(msg: types.Message):
