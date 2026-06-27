@@ -1083,7 +1083,8 @@ async def referrals(msg: types.Message):
         parse_mode="Markdown"
     )
 
-@dp.message(lambda m: m.text and "играть" in m.text.lower())
+@dp.message(Command("play"))
+@dp.message(lambda m: m.text and ("играть" in m.text.lower() or "🎮" in m.text))
 async def play_game(msg: types.Message):
     uid  = msg.from_user.id
     user = get_user(uid)
