@@ -1069,6 +1069,48 @@ async def cmd_start(msg: types.Message):
         parse_mode="Markdown",reply_markup=main_menu(uid)
     )
 
+def get_analytics():
+    """Воронка и сводка по игре (на основе game_progress/users)."""
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    today=datetime.now().strftime("%Y-%m-%d")
+    def one(q,a=()):
+        c.execute(q,a); r=c.fetchone(); return (r[0] if r and r[0] is not None else 0)
+    total_users   = one("SELECT COUNT(*) FROM users")
+    players       = one("SELECT COUNT(*) FROM game_progress WHERE best_level>0")
+    active_today  = one("SELECT COUNT(*) FROM game_progress WHERE last_day=?",(today,))
+    avg_level     = one("SELECT AVG(best_level) FROM game_progress WHERE best_level>0")
+    max_level     = one("SELECT MAX(best_level) FROM game_progress")
+    funnel={}
+    for L in (1,3,5,10,15,20,30,50):
+        funnel[L]=one("SELECT COUNT(*) FROM game_progress WHERE best_level>=?",(L,))
+    starter = one("SELECT COUNT(*) FROM users WHERE starter_bought=1")
+    vip     = one("SELECT COUNT(*) FROM users WHERE vip_until IS NOT NULL AND vip_until>?",(datetime.now().isoformat(),))
+    noads   = one("SELECT COUNT(*) FROM users WHERE noads_until IS NOT NULL AND noads_until>?",(datetime.now().isoformat(),))
+    conn.close()
+    return dict(total_users=total_users,players=players,active_today=active_today,
+                avg_level=round(avg_level,1),max_level=max_level,funnel=funnel,
+                starter=starter,vip=vip,noads=noads)
+
+@dp.message(Command("stats"))
+async def stats_cmd(msg: types.Message):
+    if msg.from_user.id!=OWNER_ID: return await msg.answer("❌ Нет доступа.")
+    a=get_analytics(); f=a["funnel"]; base=max(1,f.get(1,0))
+    def bar(n):
+        pct=int(n/base*100); filled=round(pct/10)
+        return "█"*filled+"░"*(10-filled)+f" {pct}% ({n})"
+    funnel_txt="".join(f"Ур.{L:>2}: {bar(f[L])}\n" for L in (1,3,5,10,15,20,30,50))
+    await msg.answer(
+        f"📊 *АНАЛИТИКА МАТЧ-3*\n{'═'*26}\n"
+        f"👥 Всего в боте: *{a['total_users']}*\n"
+        f"🎮 Играли в матч-3: *{a['players']}*\n"
+        f"🟢 Активны сегодня: *{a['active_today']}*\n"
+        f"📈 Средний уровень: *{a['avg_level']}* · макс: *{a['max_level']}*\n{'─'*26}\n"
+        f"*ВОРОНКА (где отваливаются):*\n{funnel_txt}{'─'*26}\n"
+        f"💰 *Монетизация:*\n🎁 Набор новичка: *{a['starter']}*\n👑 VIP сейчас: *{a['vip']}*\n🚫 Без рекламы: *{a['noads']}*\n{'═'*26}\n"
+        f"💡 Где процент резко падает — там игроки бросают: упрости те уровни или дай больше ходов.",
+        parse_mode="Markdown"
+    )
+
 @dp.message(Command("admin"))
 async def cmd_admin(msg: types.Message):
     if msg.from_user.id!=OWNER_ID: return await msg.answer("❌ Нет доступа.")
