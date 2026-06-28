@@ -862,7 +862,19 @@ bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-def main_menu():
+def game_url_for(uid=None):
+    """Ссылка на игру с прогрессом игрока. Бот передаёт сохранённый уровень,
+    чтобы при очистке кэша Telegram прогресс восстановился с сервера."""
+    if uid is None:
+        return GAME_URL
+    try:
+        prog = game_get(uid); best = prog[0] if prog else 0
+    except Exception:
+        best = 0
+    sep = "&" if "?" in GAME_URL else "?"
+    return f"{GAME_URL}{sep}uid={uid}&lvl={best}"
+
+def main_menu(uid=None):
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🏙️ Мой город"),  KeyboardButton(text="🏗️ Здания")],
         [KeyboardButton(text="💰 Собрать"),     KeyboardButton(text="⛏️ Майнинг")],
@@ -872,7 +884,7 @@ def main_menu():
         [KeyboardButton(text="🛒 Магазин"),     KeyboardButton(text="💸 Вывод")],
         [KeyboardButton(text="👥 Рефералы"),    KeyboardButton(text="🏆 Рейтинг")],
         [KeyboardButton(text="ℹ️ Помощь")],
-        [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=GAME_URL))],
+        [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=game_url_for(uid)))],
     ],resize_keyboard=True)
 
 def buildings_kb(uid):
@@ -947,7 +959,7 @@ async def cmd_start(msg: types.Message):
         f"🏅 Ранг:   *{rank}*\n"
         f"{'─'*28}\n"
         f"🏙️ Строй • ⚔️ Воюй • 💎 Майни • 💸 Выводи",
-        parse_mode="Markdown",reply_markup=main_menu()
+        parse_mode="Markdown",reply_markup=main_menu(uid)
     )
 
 @dp.message(Command("admin"))
@@ -1588,7 +1600,7 @@ async def play_game(msg: types.Message):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🎮 Открыть CityEmpire Match",
-                            web_app=types.WebAppInfo(url=GAME_URL))],
+                            web_app=types.WebAppInfo(url=game_url_for(uid)))],
             [KeyboardButton(text="🔙 Меню")],
         ],
         resize_keyboard=True
@@ -1612,7 +1624,8 @@ async def play_game(msg: types.Message):
 
 @dp.message(lambda m: m.text=="🔙 Меню")
 async def back_to_menu(msg: types.Message):
-    await msg.answer("🏙️ Главное меню",reply_markup=main_menu())
+    uid=msg.from_user.id
+    await msg.answer("🏙️ Главное меню",reply_markup=main_menu(uid))
 
 @dp.message(lambda m: m.web_app_data is not None)
 async def web_app_data_handler(msg: types.Message):
@@ -1627,7 +1640,7 @@ async def web_app_data_handler(msg: types.Message):
                 await msg.answer(
                     "🔄 Обнови игру: теперь награды считает сервер.\n"
                     "Открой 🎮 Играть заново — прогресс не потеряется.",
-                    reply_markup=main_menu()
+                    reply_markup=main_menu(uid)
                 )
                 return
             reward, top, status = game_claim(uid, level)
@@ -1635,7 +1648,7 @@ async def web_app_data_handler(msg: types.Message):
                 await msg.answer(
                     f"🎮 *Прогресс сохранён* — лучший уровень *{top}*.\n"
                     f"Новых наград пока нет: пройди дальше, чтобы заработать ещё CITY!",
-                    parse_mode="Markdown", reply_markup=main_menu()
+                    parse_mode="Markdown", reply_markup=main_menu(uid)
                 )
                 return
             cm = get_crypto_mining(uid,'city'); bal = cm[3] if cm else 0
@@ -1646,7 +1659,7 @@ async def web_app_data_handler(msg: types.Message):
                 f"🪙 Начислено: *+{format_coins(reward)} CITY*\n"
                 f"💼 CITY-баланс: *{round(bal,2)} CITY*{note}\n{'─'*28}\n"
                 f"📈 Выводи в 💎 Крипто (есть дневной лимит вывода)\n{'═'*28}",
-                parse_mode="Markdown", reply_markup=main_menu()
+                parse_mode="Markdown", reply_markup=main_menu(uid)
             )
             await bot.send_message(OWNER_ID,
                 f"🎮 *Награда из игры*\n👤 `{uid}`\n🏆 ур.{top}\n🪙 +{format_coins(reward)} CITY",
