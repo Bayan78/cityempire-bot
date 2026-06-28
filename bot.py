@@ -1111,6 +1111,25 @@ async def stats_cmd(msg: types.Message):
         parse_mode="Markdown"
     )
 
+@dp.message(Command("backup"))
+async def backup_cmd(msg: types.Message):
+    if msg.from_user.id!=OWNER_ID: return await msg.answer("❌ Нет доступа.")
+    await send_backup()
+    await msg.answer("✅ Бэкап базы отправлен. Сохрани файл — это копия всех данных (рефералы, балансы, прогресс).")
+
+async def send_backup():
+    """Шлёт владельцу файл базы данных как резервную копию."""
+    try:
+        if os.path.exists(DB):
+            await bot.send_document(
+                OWNER_ID,
+                types.FSInputFile(DB, filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db"),
+                caption="💾 Резервная копия базы CityEmpire (рефералы, балансы, прогресс). Храни в надёжном месте."
+            )
+    except Exception as e:
+        try: await bot.send_message(OWNER_ID, f"⚠️ Не удалось сделать бэкап: {e}")
+        except Exception: pass
+
 @dp.message(Command("admin"))
 async def cmd_admin(msg: types.Message):
     if msg.from_user.id!=OWNER_ID: return await msg.answer("❌ Нет доступа.")
@@ -1768,7 +1787,7 @@ async def withdraw(msg: types.Message):
 @dp.message(lambda m: m.text=="👥 Рефералы")
 async def referrals(msg: types.Message):
     uid=msg.from_user.id; refs=get_referrals(uid)
-    link=f"https://t.me/ТВОЙ_БОТ?start={uid}"
+    link=f"https://t.me/citympirebot?start={uid}"
     await msg.answer(
         f"👥 *РЕФЕРАЛЫ*\n{'═'*28}\n"
         f"💰 За каждого друга: *+500* 🪙\n{'─'*28}\n"
@@ -2276,6 +2295,10 @@ async def reminder_loop():
     while True:
         try:
             await check_tournament_rollover()   # закрыть прошлую неделю и выдать призы
+            # авто-бэкап базы владельцу раз в день
+            today=datetime.now().strftime("%Y-%m-%d")
+            if get_setting('last_backup')!=today:
+                await send_backup(); set_setting('last_backup', today)
             targets=users_to_remind(200)
             for uid in targets:
                 try:
