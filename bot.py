@@ -95,6 +95,8 @@ SHOP_ITEMS = {
     "coins_500k":{"name":"💰 500,000 монет",  "desc":"Мгновенное пополнение",  "stars":40, "coins":500_000},
     "shield":    {"name":"🛡️ Щит 24ч",       "desc":"Защита от атак",         "stars":20, "shield_hours":24},
     "army_pack": {"name":"⚔️ Армейский пак",  "desc":"100 солдат + 50 рыцарей","stars":60, "army":True},
+    "no_ads_30": {"name":"🚫 Без рекламы 30 дней","desc":"Убирает рекламу между уровнями в матч-3","stars":40,"noads_days":30},
+    "city_pack": {"name":"🪙 Набор 5000 CITY","desc":"Премиум-валюта прямо на баланс","stars":50,"city":5000},
 }
 
 RANK_TITLES = [
@@ -163,7 +165,11 @@ def init_db():
     # ── миграция: добавляем колонки для срочного VIP и бустов ──
     for col, ddl in [("vip_until","TIMESTAMP DEFAULT NULL"),
                      ("boost_mult","REAL DEFAULT 1"),
-                     ("boost_until","TIMESTAMP DEFAULT NULL")]:
+                     ("boost_until","TIMESTAMP DEFAULT NULL"),
+                     ("noads_until","TIMESTAMP DEFAULT NULL"),
+                     ("notify","INTEGER DEFAULT 1"),
+                     ("last_ping","TIMESTAMP DEFAULT NULL"),
+                     ("last_seen","TIMESTAMP DEFAULT NULL")]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -323,6 +329,34 @@ def activate_boost(uid, mult, hours):
     conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("UPDATE users SET boost_mult=?,boost_until=? WHERE user_id=?",(mult,until,uid))
     conn.commit(); conn.close()
+
+def noads_active(uid):
+    """True если у игрока сейчас «без рекламы» (VIP — тоже без рекламы)."""
+    if vip_active(uid):
+        return True
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT noads_until FROM users WHERE user_id=?",(uid,))
+    row=c.fetchone(); conn.close()
+    if row and row[0]:
+        try:
+            return datetime.now()<datetime.fromisoformat(row[0])
+        except:
+            return False
+    return False
+
+def activate_noads(uid, days):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT noads_until FROM users WHERE user_id=?",(uid,))
+    row=c.fetchone(); base=datetime.now()
+    if row and row[0]:
+        try:
+            cur=datetime.fromisoformat(row[0])
+            if cur>base: base=cur
+        except:
+            pass
+    until=(base+timedelta(days=days)).isoformat()
+    c.execute("UPDATE users SET noads_until=? WHERE user_id=?",(until,uid))
+    conn.commit(); conn.close(); return until
 
 def vip_status_text(uid):
     if uid==OWNER_ID:
@@ -653,6 +687,15 @@ def get_top_users():
     c.execute("SELECT user_id,username,balance FROM users ORDER BY balance DESC LIMIT 10")
     rows=c.fetchall(); conn.close(); return rows
 
+def get_match_top():
+    """ТОП игроков матч-3 по лучшему пройденному уровню."""
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("""SELECT g.user_id, u.username, g.best_level
+                 FROM game_progress g LEFT JOIN users u ON u.user_id=g.user_id
+                 WHERE g.best_level>0
+                 ORDER BY g.best_level DESC, g.user_id ASC LIMIT 10""")
+    rows=c.fetchall(); conn.close(); return rows
+
 def get_all_users():
     conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute("SELECT user_id FROM users WHERE banned=0")
@@ -863,16 +906,21 @@ dp  = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 def game_url_for(uid=None):
-    """Ссылка на игру с прогрессом игрока. Бот передаёт сохранённый уровень,
-    чтобы при очистке кэша Telegram прогресс восстановился с сервера."""
+    """Ссылка на игру с прогрессом И балансом игрока. Бот передаёт сохранённый
+    уровень и общий баланс CITY, чтобы игра показывала реальный счёт."""
     if uid is None:
         return GAME_URL
     try:
         prog = game_get(uid); best = prog[0] if prog else 0
     except Exception:
         best = 0
+    try:
+        cm = get_crypto_mining(uid,'city'); bal = int(cm[3]) if cm else 0
+    except Exception:
+        bal = 0
     sep = "&" if "?" in GAME_URL else "?"
-    return f"{GAME_URL}{sep}uid={uid}&lvl={best}"
+    no = "&noads=1" if noads_active(uid) else ""
+    return f"{GAME_URL}{sep}uid={uid}&lvl={best}&bal={bal}{no}"
 
 def main_menu(uid=None):
     return ReplyKeyboardMarkup(keyboard=[
@@ -883,7 +931,7 @@ def main_menu(uid=None):
         [KeyboardButton(text="📋 Задания"),     KeyboardButton(text="🏰 Клан")],
         [KeyboardButton(text="🛒 Магазин"),     KeyboardButton(text="💸 Вывод")],
         [KeyboardButton(text="👥 Рефералы"),    KeyboardButton(text="🏆 Рейтинг")],
-        [KeyboardButton(text="ℹ️ Помощь")],
+        [KeyboardButton(text="ℹ️ Помощь"),      KeyboardButton(text="🎮 Топ игры")],
         [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=game_url_for(uid)))],
     ],resize_keyboard=True)
 
@@ -948,6 +996,7 @@ async def cmd_start(msg: types.Message):
             try: await bot.send_message(ref_id,"🎉 Новый игрок по твоей ссылке! *+500* 🪙",parse_mode="Markdown")
             except: pass
     user=get_user(uid); rank=get_rank(user[2])
+    touch_seen(uid)
     vip_b="  👑 VIP" if vip_active(uid) else ""; crown="\n🔱 *ВЛАДЕЛЕЦ ИГРЫ*" if uid==OWNER_ID else ""
     await msg.answer(
         f"🌆✨ *CITY EMPIRE* ✨🌆{crown}\n"
@@ -1537,6 +1586,16 @@ async def successful_payment(msg: types.Message):
         c.execute("UPDATE army SET amount=amount+50 WHERE user_id=? AND unit_id='knight'",(uid,))
         conn.commit(); conn.close()
         text="✅ *Армейский пак!* +100⚔️ +50🛡️"
+    elif item_id=="no_ads_30":
+        days=item.get("noads_days",30); activate_noads(uid,days)
+        text=f"✅ *Реклама отключена* на {days} дн.! 🚫 Открой 🎮 матч-3 заново."
+    elif item_id=="city_pack":
+        amt=item.get("city",0)
+        conn=sqlite3.connect(DB); c=conn.cursor()
+        c.execute("INSERT OR IGNORE INTO crypto_mining (user_id,crypto_type) VALUES (?,'city')",(uid,))
+        c.execute("UPDATE crypto_mining SET balance=balance+?,total_mined=total_mined+? WHERE user_id=? AND crypto_type='city'",(amt,amt,uid))
+        conn.commit(); conn.close()
+        text=f"✅ *+{format_coins(amt)} CITY* зачислено на баланс! 🪙"
     else:
         text="✅ Покупка выполнена!"
     await msg.answer(text,parse_mode="Markdown")
@@ -1676,6 +1735,40 @@ async def rating(msg: types.Message):
         lines+=f"{medals[i]} *{uname or uid}* — {format_coins(bal)} 🪙 {get_rank(bal)}\n"
     await msg.answer(f"🏆 *ТОП-10*\n{'═'*28}\n{lines}{'═'*28}",parse_mode="Markdown")
 
+@dp.message(Command("noping"))
+async def noping_cmd(msg: types.Message):
+    parts=msg.text.split()
+    if len(parts)>1 and parts[1].lower() in ("on","вкл"):
+        set_notify(msg.from_user.id, True)
+        await msg.answer("🔔 Напоминания включены.")
+    else:
+        set_notify(msg.from_user.id, False)
+        await msg.answer("🔕 Напоминания отключены. Включить обратно: `/noping on`", parse_mode="Markdown")
+
+@dp.message(Command("top"))
+async def match_top_cmd(msg: types.Message):
+    touch_seen(msg.from_user.id)
+    await _send_match_top(msg)
+
+@dp.message(lambda m: m.text=="🎮 Топ игры")
+async def match_top_btn(msg: types.Message):
+    await _send_match_top(msg)
+
+async def _send_match_top(msg: types.Message):
+    rows=get_match_top(); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    if not rows:
+        await msg.answer("🎮 Пока никто не играл в матч-3. Будь первым — жми 🎮 Играть!")
+        return
+    lines=""
+    for i,(uid,uname,lvl) in enumerate(rows):
+        who = ("@"+uname) if uname else str(uid)
+        lines += f"{medals[i]} *{who}* — уровень *{lvl}*\n"
+    await msg.answer(
+        f"🎮 *ТОП МАТЧ-3*\n{'═'*28}\n{lines}{'─'*28}\n"
+        f"Проходи уровни и забирай награду в боте — твой лучший уровень попадёт в топ!\n{'═'*28}",
+        parse_mode="Markdown"
+    )
+
 @dp.message(lambda m: m.text=="ℹ️ Помощь")
 async def help_msg(msg: types.Message):
     await msg.answer(
@@ -1683,7 +1776,7 @@ async def help_msg(msg: types.Message):
         f"🏗️ Строй здания → доход/час\n💰 Собирай монеты\n"
         f"⛏️ Майни каждые 8ч\n💎 Крипто-майнинг TON/CITY\n"
         f"🎰 Слот раз в день\n🎁 Бонус каждый день\n"
-        f"📋 Выполняй задания → награды\n🎮 Играй в матч-3\n"
+        f"📋 Выполняй задания → награды\n🎮 Играй в матч-3 (топ: /top)\n"
         f"⚔️ Атакуй игроков\n🏰 Вступи в клан\n"
         f"🛒 VIP и бусты\n💸 Вывод от {format_coins(get_min_withdraw())} 🪙\n{'─'*28}\n"
         f"`/attack ID` — атака\n`/createclan ИМЯ` — клан\n"
@@ -1967,9 +2060,69 @@ async def ban(msg: types.Message):
     ban_user(int(parts[1]))
     await msg.answer(f"🚫 Игрок `{parts[1]}` заблокирован.",parse_mode="Markdown")
 
+def touch_seen(uid):
+    """Отметить активность игрока (для умных напоминаний)."""
+    try:
+        conn=sqlite3.connect(DB); c=conn.cursor()
+        c.execute("UPDATE users SET last_seen=? WHERE user_id=?",(datetime.now().isoformat(),uid))
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+def set_notify(uid, on):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE users SET notify=? WHERE user_id=?",(1 if on else 0,uid))
+    conn.commit(); conn.close()
+
+def users_to_remind(limit=200):
+    """Игроки для напоминания: подписаны, не заходили >20ч, не пинговали >20ч."""
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT user_id,last_seen,last_ping FROM users WHERE banned=0 AND notify=1")
+    rows=c.fetchall(); conn.close()
+    now=datetime.now(); out=[]
+    for uid,seen,ping in rows:
+        def old(ts, hrs):
+            if not ts: return True
+            try: return (now-datetime.fromisoformat(ts)).total_seconds() > hrs*3600
+            except: return True
+        if old(seen,20) and old(ping,20):
+            out.append(uid)
+        if len(out)>=limit: break
+    return out
+
+def mark_pinged(uid):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("UPDATE users SET last_ping=? WHERE user_id=?",(datetime.now().isoformat(),uid))
+    conn.commit(); conn.close()
+
+REMINDERS = [
+    "🎮 Заходи в CityEmpire! 🎁 Ежедневная награда уже ждёт тебя.",
+    "❤️ Жизни в матч-3 восстановились — заходи проходить уровни!",
+    "🏆 Соперники набирают уровни в матч-3. Проверь /top и обгони их!",
+    "🪙 Новый день — новые CITY. Загляни в игру и собери награду!",
+]
+async def reminder_loop():
+    """Раз в час будит неактивных игроков (не чаще раза в сутки на игрока)."""
+    import random
+    await asyncio.sleep(60)  # дать боту стартовать
+    while True:
+        try:
+            targets=users_to_remind(200)
+            for uid in targets:
+                try:
+                    await bot.send_message(uid, random.choice(REMINDERS), reply_markup=main_menu(uid))
+                    mark_pinged(uid)
+                except Exception:
+                    mark_pinged(uid)  # заблокировал бота и т.п. — не долбим повторно
+                await asyncio.sleep(0.12)  # бережём лимиты Telegram (~30 msg/sec)
+        except Exception:
+            pass
+        await asyncio.sleep(3600)  # цикл раз в час
+
 async def main():
     init_db()
     print("✅ CityEmpire Bot запущен!")
+    asyncio.create_task(reminder_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
