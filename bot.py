@@ -97,6 +97,7 @@ SHOP_ITEMS = {
     "army_pack": {"name":"⚔️ Армейский пак",  "desc":"100 солдат + 50 рыцарей","stars":60, "army":True},
     "no_ads_30": {"name":"🚫 Без рекламы 30 дней","desc":"Убирает рекламу между уровнями в матч-3","stars":40,"noads_days":30},
     "city_pack": {"name":"🪙 Набор 5000 CITY","desc":"Премиум-валюта прямо на баланс","stars":50,"city":5000},
+    "starter_pack":{"name":"🎁 Набор новичка","desc":"VIP 3 дня + 1000 CITY + без рекламы 7 дней (только один раз!)","stars":15,"starter":True},
 }
 
 RANK_TITLES = [
@@ -169,7 +170,8 @@ def init_db():
                      ("noads_until","TIMESTAMP DEFAULT NULL"),
                      ("notify","INTEGER DEFAULT 1"),
                      ("last_ping","TIMESTAMP DEFAULT NULL"),
-                     ("last_seen","TIMESTAMP DEFAULT NULL")]:
+                     ("last_seen","TIMESTAMP DEFAULT NULL"),
+                     ("starter_bought","INTEGER DEFAULT 0")]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -226,6 +228,10 @@ def init_db():
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS tournament (
+        user_id INTEGER, week TEXT, level INTEGER DEFAULT 0,
+        PRIMARY KEY(user_id, week)
     )""")
     c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('coin_to_usdt','0.00001')")
     c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('min_withdraw','50000')")
@@ -701,6 +707,57 @@ def get_all_users():
     c.execute("SELECT user_id FROM users WHERE banned=0")
     rows=[r[0] for r in c.fetchall()]; conn.close(); return rows
 
+# ─────────────── ЕЖЕНЕДЕЛЬНЫЙ ТУРНИР ───────────────
+TOURNEY_PRIZES = [5000, 3000, 1500]   # CITY за 1/2/3 место
+def iso_week(d=None):
+    return (d or datetime.now()).strftime("%G-W%V")
+def record_tournament(uid, level):
+    """Обновить недельный результат игрока (берём максимальный уровень за неделю)."""
+    wk=iso_week()
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT OR IGNORE INTO tournament (user_id,week,level) VALUES (?,?,0)",(uid,wk))
+    c.execute("UPDATE tournament SET level=? WHERE user_id=? AND week=? AND level<?",(level,uid,wk,level))
+    conn.commit(); conn.close()
+def get_tournament_top(week=None, limit=10):
+    wk=week or iso_week()
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("""SELECT t.user_id, u.username, t.level FROM tournament t
+                 LEFT JOIN users u ON u.user_id=t.user_id
+                 WHERE t.week=? AND t.level>0
+                 ORDER BY t.level DESC, t.user_id ASC LIMIT ?""",(wk,limit))
+    rows=c.fetchall(); conn.close(); return rows
+def credit_city(uid, amount):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT OR IGNORE INTO crypto_mining (user_id,crypto_type) VALUES (?,'city')",(uid,))
+    c.execute("UPDATE crypto_mining SET balance=balance+?,total_mined=total_mined+? WHERE user_id=? AND crypto_type='city'",(amount,amount,uid))
+    conn.commit(); conn.close()
+async def finalize_tournament(prev_week):
+    """Наградить топ-3 прошлой недели и уведомить."""
+    winners=get_tournament_top(prev_week,3)
+    medals=["🥇","🥈","🥉"]
+    for i,(uid,uname,lvl) in enumerate(winners):
+        prize=TOURNEY_PRIZES[i] if i<len(TOURNEY_PRIZES) else 0
+        if prize<=0: continue
+        credit_city(uid,prize)
+        try:
+            await bot.send_message(uid,
+                f"🏆 *ТУРНИР ЗАВЕРШЁН!*\n{'═'*24}\n{medals[i]} Ты занял *{i+1} место* (уровень {lvl})!\n"
+                f"🪙 Приз: *+{format_coins(prize)} CITY* на баланс!\n{'─'*24}\nНовая неделя — новый турнир. Удачи!",
+                parse_mode="Markdown")
+        except Exception: pass
+    if winners:
+        try:
+            await bot.send_message(OWNER_ID, f"🏆 Турнир {prev_week} завершён. Победителей: {len(winners)}.")
+        except Exception: pass
+async def check_tournament_rollover():
+    """Если началась новая неделя — закрыть прошлую и выдать призы."""
+    cur=iso_week(); stored=get_setting('tourney_week')
+    if stored is None:
+        set_setting('tourney_week', cur); return
+    if stored!=cur:
+        await finalize_tournament(stored)
+        set_setting('tourney_week', cur)
+
 def create_withdrawal(uid,amount,wallet):
     usdt=round(amount*get_rate(),4)
     conn=sqlite3.connect(DB); c=conn.cursor()
@@ -932,6 +989,7 @@ def main_menu(uid=None):
         [KeyboardButton(text="🛒 Магазин"),     KeyboardButton(text="💸 Вывод")],
         [KeyboardButton(text="👥 Рефералы"),    KeyboardButton(text="🏆 Рейтинг")],
         [KeyboardButton(text="ℹ️ Помощь"),      KeyboardButton(text="🎮 Топ игры")],
+        [KeyboardButton(text="🏆 Турнир")],
         [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=game_url_for(uid)))],
     ],resize_keyboard=True)
 
@@ -1562,6 +1620,31 @@ async def buy_item(call: types.CallbackQuery):
 async def pre_checkout(query: types.PreCheckoutQuery):
     await bot.answer_pre_checkout_query(query.id,ok=True)
 
+def starter_available(uid):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT starter_bought FROM users WHERE user_id=?",(uid,))
+    row=c.fetchone(); conn.close()
+    return not (row and row[0])
+
+async def send_starter_offer(msg, uid):
+    item=SHOP_ITEMS.get("starter_pack")
+    if not starter_available(uid):
+        await msg.answer("🎁 Набор новичка уже куплен — спасибо! Загляни в 🛒 Магазин за другими товарами.", reply_markup=main_menu(uid))
+        return
+    await msg.answer(
+        f"🎁 *НАБОР НОВИЧКА* — только один раз!\n{'═'*26}\n"
+        f"👑 VIP 3 дня (x2 доход)\n🪙 +1000 CITY на баланс\n🚫 Без рекламы 7 дней\n{'─'*26}\n"
+        f"💎 Всего за *{item['stars']} ⭐*!", parse_mode="Markdown")
+    await msg.answer_invoice(
+        title=item["name"], description=item["desc"],
+        payload=f"starter_pack:{uid}", currency="XTR",
+        prices=[types.LabeledPrice(label=item["name"],amount=item["stars"])],
+        provider_token=""
+    )
+
+@dp.message(Command("starter"))
+async def starter_cmd(msg: types.Message):
+    await send_starter_offer(msg, msg.from_user.id)
 @dp.message(lambda m: m.successful_payment is not None)
 async def successful_payment(msg: types.Message):
     uid=msg.from_user.id; item_id=msg.successful_payment.invoice_payload.split(":")[0]
@@ -1596,6 +1679,12 @@ async def successful_payment(msg: types.Message):
         c.execute("UPDATE crypto_mining SET balance=balance+?,total_mined=total_mined+? WHERE user_id=? AND crypto_type='city'",(amt,amt,uid))
         conn.commit(); conn.close()
         text=f"✅ *+{format_coins(amt)} CITY* зачислено на баланс! 🪙"
+    elif item_id=="starter_pack":
+        activate_vip(uid,3); activate_noads(uid,7); credit_city(uid,1000)
+        conn=sqlite3.connect(DB); c=conn.cursor()
+        c.execute("UPDATE users SET starter_bought=1 WHERE user_id=?",(uid,))
+        conn.commit(); conn.close()
+        text="✅ *Набор новичка активирован!* 👑 VIP 3 дня • 🪙 +1000 CITY • 🚫 без рекламы 7 дней!"
     else:
         text="✅ Покупка выполнена!"
     await msg.answer(text,parse_mode="Markdown")
@@ -1692,6 +1781,9 @@ async def web_app_data_handler(msg: types.Message):
     try:
         data = json.loads(msg.web_app_data.data)
         action = data.get('action')
+        if action=='starter':
+            await send_starter_offer(msg, uid)
+            return
         if action in ('claim','level_complete','withdraw'):
             level = data.get('level', data.get('best_level'))
             if level is None:
@@ -1703,6 +1795,7 @@ async def web_app_data_handler(msg: types.Message):
                 )
                 return
             reward, top, status = game_claim(uid, level)
+            record_tournament(uid, top)
             if reward <= 0:
                 await msg.answer(
                     f"🎮 *Прогресс сохранён* — лучший уровень *{top}*.\n"
@@ -1734,6 +1827,39 @@ async def rating(msg: types.Message):
     for i,(uid,uname,bal) in enumerate(top):
         lines+=f"{medals[i]} *{uname or uid}* — {format_coins(bal)} 🪙 {get_rank(bal)}\n"
     await msg.answer(f"🏆 *ТОП-10*\n{'═'*28}\n{lines}{'═'*28}",parse_mode="Markdown")
+
+@dp.message(Command("tournament"))
+async def tournament_cmd(msg: types.Message):
+    touch_seen(msg.from_user.id)
+    await _send_tournament(msg)
+
+@dp.message(lambda m: m.text=="🏆 Турнир")
+async def tournament_btn(msg: types.Message):
+    touch_seen(msg.from_user.id)
+    await _send_tournament(msg)
+
+async def _send_tournament(msg: types.Message):
+    await check_tournament_rollover()
+    rows=get_tournament_top(limit=10); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    # время до конца недели (понедельник 00:00)
+    now=datetime.now(); days_left=(7-now.weekday())%7
+    if days_left==0: days_left=7
+    end=(now+timedelta(days=days_left)).replace(hour=0,minute=0,second=0,microsecond=0)
+    left=end-now; dl=left.days; hl=int(left.seconds//3600)
+    prizes=f"🥇 {format_coins(TOURNEY_PRIZES[0])} • 🥈 {format_coins(TOURNEY_PRIZES[1])} • 🥉 {format_coins(TOURNEY_PRIZES[2])} CITY"
+    if not rows:
+        body="Пока нет участников. Пройди уровни в матч-3 и забери награду — попадёшь в турнир!"
+    else:
+        body=""
+        for i,(uid,uname,lvl) in enumerate(rows):
+            who=("@"+uname) if uname else str(uid)
+            body+=f"{medals[i]} *{who}* — ур. *{lvl}*\n"
+    await msg.answer(
+        f"🏆 *ЕЖЕНЕДЕЛЬНЫЙ ТУРНИР*\n{'═'*26}\n"
+        f"⏳ До конца: *{dl}д {hl}ч*\n🎁 Призы: {prizes}\n{'─'*26}\n{body}{'─'*26}\n"
+        f"Играй в 🎮 матч-3, поднимай уровень и забирай награду в боте — твой уровень идёт в зачёт!\n{'═'*26}",
+        parse_mode="Markdown"
+    )
 
 @dp.message(Command("noping"))
 async def noping_cmd(msg: types.Message):
@@ -2107,6 +2233,7 @@ async def reminder_loop():
     await asyncio.sleep(60)  # дать боту стартовать
     while True:
         try:
+            await check_tournament_rollover()   # закрыть прошлую неделю и выдать призы
             targets=users_to_remind(200)
             for uid in targets:
                 try:
