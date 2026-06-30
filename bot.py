@@ -696,18 +696,37 @@ def get_referrals(uid):
     c.execute("SELECT COUNT(*) FROM users WHERE referrer_id=?",(uid,))
     cnt=c.fetchone()[0]; conn.close(); return cnt
 
-def get_top_users():
+def get_referral_list(uid, limit=50):
+    """Подробный список рефералов: ник, ID, дата захода, уровень в игре, баланс."""
     conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute("SELECT user_id,username,balance FROM users ORDER BY balance DESC LIMIT 10")
+    c.execute("""SELECT u.user_id, u.username, u.joined_at, u.balance,
+                        COALESCE(g.best_level,0)
+                 FROM users u LEFT JOIN game_progress g ON g.user_id=u.user_id
+                 WHERE u.referrer_id=?
+                 ORDER BY u.joined_at DESC LIMIT ?""",(uid,limit))
     rows=c.fetchall(); conn.close(); return rows
 
-def get_match_top():
+def get_top_users(viewer=None):
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    if viewer==OWNER_ID:
+        c.execute("SELECT user_id,username,balance FROM users ORDER BY balance DESC LIMIT 10")
+    else:
+        c.execute("SELECT user_id,username,balance FROM users WHERE user_id!=? ORDER BY balance DESC LIMIT 10",(OWNER_ID,))
+    rows=c.fetchall(); conn.close(); return rows
+
+def get_match_top(viewer=None):
     """ТОП игроков матч-3 по лучшему пройденному уровню."""
     conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute("""SELECT g.user_id, u.username, g.best_level
-                 FROM game_progress g LEFT JOIN users u ON u.user_id=g.user_id
-                 WHERE g.best_level>0
-                 ORDER BY g.best_level DESC, g.user_id ASC LIMIT 10""")
+    if viewer==OWNER_ID:
+        c.execute("""SELECT g.user_id, u.username, g.best_level
+                     FROM game_progress g LEFT JOIN users u ON u.user_id=g.user_id
+                     WHERE g.best_level>0
+                     ORDER BY g.best_level DESC, g.user_id ASC LIMIT 10""")
+    else:
+        c.execute("""SELECT g.user_id, u.username, g.best_level
+                     FROM game_progress g LEFT JOIN users u ON u.user_id=g.user_id
+                     WHERE g.best_level>0 AND g.user_id!=?
+                     ORDER BY g.best_level DESC, g.user_id ASC LIMIT 10""",(OWNER_ID,))
     rows=c.fetchall(); conn.close(); return rows
 
 def get_all_users():
@@ -726,13 +745,19 @@ def record_tournament(uid, level):
     c.execute("INSERT OR IGNORE INTO tournament (user_id,week,level) VALUES (?,?,0)",(uid,wk))
     c.execute("UPDATE tournament SET level=? WHERE user_id=? AND week=? AND level<?",(level,uid,wk,level))
     conn.commit(); conn.close()
-def get_tournament_top(week=None, limit=10):
+def get_tournament_top(week=None, limit=10, viewer=None):
     wk=week or iso_week()
     conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute("""SELECT t.user_id, u.username, t.level FROM tournament t
-                 LEFT JOIN users u ON u.user_id=t.user_id
-                 WHERE t.week=? AND t.level>0
-                 ORDER BY t.level DESC, t.user_id ASC LIMIT ?""",(wk,limit))
+    if viewer==OWNER_ID:
+        c.execute("""SELECT t.user_id, u.username, t.level FROM tournament t
+                     LEFT JOIN users u ON u.user_id=t.user_id
+                     WHERE t.week=? AND t.level>0
+                     ORDER BY t.level DESC, t.user_id ASC LIMIT ?""",(wk,limit))
+    else:
+        c.execute("""SELECT t.user_id, u.username, t.level FROM tournament t
+                     LEFT JOIN users u ON u.user_id=t.user_id
+                     WHERE t.week=? AND t.level>0 AND t.user_id!=?
+                     ORDER BY t.level DESC, t.user_id ASC LIMIT ?""",(wk,OWNER_ID,limit))
     rows=c.fetchall(); conn.close(); return rows
 def credit_city(uid, amount):
     conn=sqlite3.connect(DB); c=conn.cursor()
@@ -1839,6 +1864,7 @@ async def withdraw(msg: types.Message):
 async def referrals(msg: types.Message):
     uid=msg.from_user.id; refs=get_referrals(uid)
     link=f"https://t.me/citympirebot?start={uid}"
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Список рефералов",callback_data="ref_list")]]) if refs>0 else None
     await msg.answer(
         f"👥 *РЕФЕРАЛЫ*\n{'═'*28}\n"
         f"💰 За каждого друга: *+500* 🪙\n{'─'*28}\n"
@@ -1846,8 +1872,30 @@ async def referrals(msg: types.Message):
         f"📊 {progress_bar(min(refs,10),10)}\n"
         f"💰 Заработано: *{format_coins(refs*500)}* 🪙\n{'─'*28}\n"
         f"🔗 Ссылка:\n`{link}`\n{'═'*28}",
-        parse_mode="Markdown"
+        parse_mode="Markdown", reply_markup=kb
     )
+
+@dp.callback_query(lambda c: c.data=="ref_list")
+async def ref_list_cb(call: types.CallbackQuery):
+    uid=call.from_user.id
+    rows=get_referral_list(uid, 50)
+    if not rows:
+        return await call.answer("Пока нет рефералов",show_alert=True)
+    total=get_referrals(uid)
+    lines=[]
+    for i,(ruid,uname,joined,bal,lvl) in enumerate(rows,1):
+        who = ("@"+uname) if uname else f"ID{ruid}"
+        date = (joined or "")[:10]
+        act = "🟢" if (lvl or 0)>0 else "⚪"
+        lines.append(f"{i}. {act} *{who}* — ур.{lvl}, {format_coins(bal)}🪙\n   🆔 `{ruid}` · 📅 {date}")
+    more = f"\n…и ещё {total-len(rows)}" if total>len(rows) else ""
+    text = (f"📋 *ТВОИ РЕФЕРАЛЫ ({total})*\n{'═'*28}\n"
+            f"🟢 — играл в матч-3 · ⚪ — ещё не играл\n{'─'*28}\n"
+            + "\n".join(lines) + more + f"\n{'═'*28}")
+    # Telegram ограничивает длину сообщения — режем при необходимости
+    if len(text)>3900: text=text[:3850]+"\n…(список длинный)"
+    await call.message.answer(text, parse_mode="Markdown")
+    await call.answer()
 
 @dp.message(Command("play"))
 @dp.message(lambda m: m.text and "играть" in m.text.lower())
@@ -1934,7 +1982,7 @@ async def web_app_data_handler(msg: types.Message):
 
 @dp.message(lambda m: m.text=="🏆 Рейтинг")
 async def rating(msg: types.Message):
-    top=get_top_users(); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    top=get_top_users(msg.from_user.id); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     lines=""
     for i,(uid,uname,bal) in enumerate(top):
         lines+=f"{medals[i]} *{uname or uid}* — {format_coins(bal)} 🪙 {get_rank(bal)}\n"
@@ -1952,7 +2000,7 @@ async def tournament_btn(msg: types.Message):
 
 async def _send_tournament(msg: types.Message):
     await check_tournament_rollover()
-    rows=get_tournament_top(limit=10); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    rows=get_tournament_top(limit=10, viewer=msg.from_user.id); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     # время до конца недели (понедельник 00:00)
     now=datetime.now(); days_left=(7-now.weekday())%7
     if days_left==0: days_left=7
@@ -1993,7 +2041,7 @@ async def match_top_btn(msg: types.Message):
     await _send_match_top(msg)
 
 async def _send_match_top(msg: types.Message):
-    rows=get_match_top(); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    rows=get_match_top(viewer=msg.from_user.id); medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     if not rows:
         await msg.answer("🎮 Пока никто не играл в матч-3. Будь первым — жми 🎮 Играть!")
         return
