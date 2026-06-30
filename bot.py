@@ -29,15 +29,18 @@ TON_WALLET_VERSION = os.getenv("TON_WALLET_VERSION", "v5r1")  # v5r1 (Tonkeeper 
 TONCENTER_KEY  = os.getenv("TONCENTER_API_KEY", "")
 TON_MIN_WD     = float(os.getenv("TON_MIN_WITHDRAW", "0.05"))   # минимум TON к выводу
 CITY_MIN_WD    = float(os.getenv("CITY_MIN_WITHDRAW", "100"))   # минимум CITY к выводу
+WD_FEE_CITY    = float(os.getenv("CITY_WITHDRAW_FEE", "0.20"))  # комиссия на вывод CITY (остаётся в системе)
+WD_FEE_TON     = float(os.getenv("TON_WITHDRAW_FEE", "0.50"))   # комиссия на вывод TON (остаётся в системе)
+def wd_fee(ct): return WD_FEE_TON if ct=="ton" else WD_FEE_CITY
 OWNER_TON_REWARD = float(os.getenv("OWNER_TON_DAILY", "10"))    # TON/сутки лично для владельца
 # Дневные лимиты ВЫВОДА на одного игрока (защита пула + мотивация играть)
 CITY_DAILY_WD_CAP = float(os.getenv("CITY_DAILY_WITHDRAW_CAP", "10000"))  # макс CITY к выводу в сутки
 TON_DAILY_WD_CAP  = float(os.getenv("TON_DAILY_WITHDRAW_CAP", "2"))       # макс TON к выводу в сутки
 
-COIN_TO_USDT    = 0.00001
+COIN_TO_USDT    = 0.000001
 MIN_WITHDRAW    = 50_000
 OWNER_START_BAL = 1_000_000_000_000
-DEFAULT_COIN_TO_USDT = 0.00001
+DEFAULT_COIN_TO_USDT = 0.000001
 CITY_TOKEN_ADDRESS   = "EQCzMUbAk5SoKTTc6y3mryqTzrn7Xh7yUn3v12jLzH1TY_TP"
 
 BUILDINGS = {
@@ -233,9 +236,14 @@ def init_db():
         user_id INTEGER, week TEXT, level INTEGER DEFAULT 0,
         PRIMARY KEY(user_id, week)
     )""")
-    c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('coin_to_usdt','0.00001')")
+    c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('coin_to_usdt','0.000001')")
     c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('min_withdraw','50000')")
     c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('referral_bonus','500')")
+    # одноразовая установка курса 1000 монет = $0.001 (не затирает будущие правки в админке)
+    c.execute("SELECT value FROM settings WHERE key='rate_set_v2'")
+    if c.fetchone() is None:
+        c.execute("UPDATE settings SET value='0.000001' WHERE key='coin_to_usdt'")
+        c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('rate_set_v2','1')")
     conn.commit(); conn.close()
 
 def get_user(uid):
@@ -980,10 +988,14 @@ def game_url_for(uid=None):
     return f"{GAME_URL}{sep}uid={uid}&lvl={best}&bal={bal}{no}"
 
 def main_menu(uid=None):
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🏙️ Мой город"),  KeyboardButton(text="🏗️ Здания")],
-        [KeyboardButton(text="💰 Собрать"),     KeyboardButton(text="⛏️ Майнинг")],
-        [KeyboardButton(text="💎 Крипто"),      KeyboardButton(text="🎰 Слот")],
+    rows=[[KeyboardButton(text="🏙️ Мой город"),  KeyboardButton(text="🏗️ Здания")]]
+    if uid==OWNER_ID:
+        rows.append([KeyboardButton(text="💰 Собрать"),     KeyboardButton(text="⛏️ Майнинг")])
+        rows.append([KeyboardButton(text="💎 Крипто"),      KeyboardButton(text="🎰 Слот")])
+    else:
+        rows.append([KeyboardButton(text="💰 Собрать"),     KeyboardButton(text="🎰 Слот")])
+        rows.append([KeyboardButton(text="🪙 Вывод CITY")])
+    rows += [
         [KeyboardButton(text="🎁 Бонус"),       KeyboardButton(text="⚔️ Атака")],
         [KeyboardButton(text="📋 Задания"),     KeyboardButton(text="🏰 Клан")],
         [KeyboardButton(text="🛒 Магазин"),     KeyboardButton(text="💸 Вывод")],
@@ -991,7 +1003,8 @@ def main_menu(uid=None):
         [KeyboardButton(text="ℹ️ Помощь"),      KeyboardButton(text="🎮 Топ игры")],
         [KeyboardButton(text="🏆 Турнир")],
         [KeyboardButton(text="🎮 ИГРАТЬ В МАТЧ-3",web_app=types.WebAppInfo(url=game_url_for(uid)))],
-    ],resize_keyboard=True)
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows,resize_keyboard=True)
 
 def buildings_kb(uid):
     blds=get_buildings(uid)
@@ -1183,9 +1196,29 @@ async def collect(msg: types.Message):
             parse_mode="Markdown"
         )
 
+@dp.message(lambda m: m.text=="🪙 Вывод CITY")
+async def city_withdraw_menu(msg: types.Message):
+    uid=msg.from_user.id; init_crypto_mining(uid)
+    row=get_crypto_mining(uid,"city"); bal=row[3] if row else 0
+    used=get_wd_today(uid,"city"); cap=CITY_DAILY_WD_CAP
+    await msg.answer(
+        f"🪙 *ВЫВОД CITY*\n{'═'*28}\n"
+        f"💼 Баланс: *{round(bal,2)} CITY*\n"
+        f"📌 Минимум: *{CITY_MIN_WD} CITY*\n"
+        f"📊 Лимит: *{cap} CITY* / сутки (сегодня {round(used,2)})\n"
+        f"💸 Комиссия: *{int(WD_FEE_CITY*100)}%* (к получению {100-int(WD_FEE_CITY*100)}%)\n"
+        f"{'─'*28}\n"
+        f"Заработанный в игре CITY выводи на свой TON-кошелёк,\n"
+        f"затем меняй CITY→TON на DeDust.io или STON.fi.\n"
+        f"{'─'*28}\n"
+        f"Команда:\n`/cwithdraw city АДРЕС`\n{'═'*28}",
+        parse_mode="Markdown")
+
 @dp.message(lambda m: m.text=="⛏️ Майнинг")
 async def mining_menu(msg: types.Message):
-    uid=msg.from_user.id; user=get_user(uid); mlvl=user[8]
+    uid=msg.from_user.id
+    if uid!=OWNER_ID: return await msg.answer("🔒 Раздел недоступен.")
+    user=get_user(uid); mlvl=user[8]
     info=MINER_LEVELS[mlvl]; rwd=int(info['reward']*income_mult(uid))
     text=(f"⛏️ *МАЙНИНГ*\n{'═'*28}\n"
           f"🔧 Майнер: *{info['name']}*\n"
@@ -1200,7 +1233,9 @@ async def mining_menu(msg: types.Message):
 
 @dp.message(lambda m: m.text=="💎 Крипто")
 async def crypto_menu(msg: types.Message):
-    uid=msg.from_user.id; init_crypto_mining(uid); user=get_user(uid)
+    uid=msg.from_user.id
+    if uid!=OWNER_ID: return await msg.answer("🔒 Раздел недоступен.")
+    init_crypto_mining(uid); user=get_user(uid)
     ton=get_crypto_mining(uid,"ton"); city_m=get_crypto_mining(uid,"city")
     ton_lvl=ton[2] if ton else 0; ton_bal=ton[3] if ton else 0
     city_lvl=city_m[2] if city_m else 0; city_bal=city_m[3] if city_m else 0
@@ -1286,10 +1321,14 @@ async def crypto_withdraw_prompt(call: types.CallbackQuery):
                f"⚠️ Для биржи MEMO/комментарий ОБЯЗАТЕЛЕН,\n"
                f"   иначе монеты потеряются!\n"
                f"{'─'*28}\n"
+               f"💸 Комиссия вывода: *{int(WD_FEE_TON*100)}%* (к получению {100-int(WD_FEE_TON*100)}%)\n"
+               f"{'─'*28}\n"
                f"На биржу:\n`/cwithdraw ton АДРЕС МЕМО`\n"
                f"На свой кошелёк (без MEMO):\n`/cwithdraw ton АДРЕС`\n")
     else:
         extra=(f"{'─'*28}\n"
+               f"💸 Комиссия вывода: *{int(WD_FEE_CITY*100)}%* (к получению {100-int(WD_FEE_CITY*100)}%)\n"
+               f"{'─'*28}\n"
                f"ℹ️ CITY на биржах нет.\n"
                f"Выводи на свой TON-кошелёк, затем\n"
                f"меняй CITY→TON на DeDust.io или STON.fi.\n"
@@ -1317,6 +1356,9 @@ async def crypto_withdraw_cmd(msg: types.Message):
     ct=parts[1].lower(); wallet=parts[2]; memo=parts[3] if len(parts)>3 else ""
     if ct not in ["ton","city"]:
         return await msg.answer("❌ Тип: `ton` или `city`",parse_mode="Markdown")
+    # вывод TON — только владелец (у игроков доступен только вывод CITY)
+    if ct=="ton" and uid!=OWNER_ID:
+        return await msg.answer("🔒 Вывод TON недоступен.\nДоступен вывод CITY: `/cwithdraw city АДРЕС`",parse_mode="Markdown")
     # TON вывод только для VIP (если включено)
     if ct=="ton" and TON_VIP_ONLY and not is_vip(uid):
         return await msg.answer(
@@ -1346,10 +1388,17 @@ async def crypto_withdraw_cmd(msg: types.Message):
     wid=create_crypto_withdrawal(uid,ct,amount,wallet,memo)
     add_wd_today(uid, ct, amount)
     left=round(bal-amount,6)
+    # комиссия: списывается полная сумма, к получению (100 - комиссия)%
+    fee_rate = wd_fee(ct)
+    fee_amt = round(amount*fee_rate,6)
+    net = round(amount-fee_amt,6)
+    comm_line = (f"💸 Комиссия {int(fee_rate*100)}%: {fee_amt} {info['symbol']}\n"
+                 f"🎁 К получению: *{net} {info['symbol']}*\n{'─'*28}\n")
     memo_line=(f"📝 MEMO: `{memo}`\n" if memo else "⚠️ Без MEMO — для биржи это потеря средств!\n")
     await msg.answer(
         f"✅ *ЗАЯВКА #{wid} НА ВЫВОД {info['symbol']}!*\n{'═'*28}\n"
         f"💰 Сумма: *{round(amount,6)} {info['symbol']}*\n"
+        f"{comm_line}"
         f"👛 Адрес: `{wallet}`\n"
         f"{memo_line}"
         f"{'─'*28}\n"
@@ -1365,7 +1414,7 @@ async def crypto_withdraw_cmd(msg: types.Message):
     await bot.send_message(OWNER_ID,
         f"🔔 *КРИПТО-ВЫВОД #{wid}* {info['symbol']}\n\n"
         f"👤 ID: `{uid}`\n"
-        f"💰 {round(amount,6)} {info['symbol']}\n"
+        f"💰 К отправке: {net} {info['symbol']} (комиссия {int(fee_rate*100)}%)\n"
         f"👛 `{wallet}`\n{memo_line}"
         f"{'👑 VIP' if ct=='ton' else '🟡 CITY'}",
         parse_mode="Markdown", reply_markup=kb
@@ -1380,15 +1429,17 @@ async def cwapprove(call: types.CallbackQuery):
     _,uid,ct,amount,address,memo,status=row
     if status!="pending": return await call.answer("Уже обработано",show_alert=True)
     info=CRYPTO_MINING[ct]
+    pay = round(amount*(1-wd_fee(ct)),6)          # к выплате с учётом комиссии
+    fee_note = f" (комиссия {int(wd_fee(ct)*100)}% удержана)"
     # авто-отправка TON on-chain (если включена)
     if ct=="ton" and TON_AUTOSEND and TON_MNEMONIC:
         await call.answer("⛓️ Отправляю on-chain...")
         try:
-            tx=await send_ton_onchain(address,amount,memo)
+            tx=await send_ton_onchain(address,pay,memo)
             set_crypto_withdrawal_status(wid,"sent",tx)
-            await call.message.edit_text(f"✅ #{wid} отправлено on-chain.\n🔗 `{tx}`",parse_mode="Markdown")
+            await call.message.edit_text(f"✅ #{wid} отправлено on-chain ({pay} {info['symbol']}{fee_note}).\n🔗 `{tx}`",parse_mode="Markdown")
             try: await bot.send_message(uid,
-                f"✅ *Вывод #{wid} отправлен!*\n💰 {round(amount,6)} {info['symbol']}\n🔗 tx: `{tx}`",
+                f"✅ *Вывод #{wid} отправлен!*\n💰 К получению: {pay} {info['symbol']}{fee_note}\n🔗 tx: `{tx}`",
                 parse_mode="Markdown")
             except: pass
             return
@@ -1399,9 +1450,9 @@ async def cwapprove(call: types.CallbackQuery):
             return
     # ручной режим
     set_crypto_withdrawal_status(wid,"approved")
-    await call.message.edit_text(f"✅ Заявка #{wid} одобрена. Отправь {round(amount,6)} {info['symbol']} вручную.")
+    await call.message.edit_text(f"✅ Заявка #{wid} одобрена. Отправь {pay} {info['symbol']} вручную{fee_note}.")
     try: await bot.send_message(uid,
-        f"✅ *Вывод #{wid} одобрен!*\n💰 {round(amount,6)} {info['symbol']} скоро придёт на "
+        f"✅ *Вывод #{wid} одобрен!*\n💰 К получению: {pay} {info['symbol']}{fee_note}\nСкоро придёт на "
         f"{'биржу' if memo else 'кошелёк'}.",
         parse_mode="Markdown")
     except: pass
